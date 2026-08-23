@@ -100,7 +100,7 @@ gh --version
 
 ## Fundamentals
 
-The Fundamentals track gets your Foundry substrate, models, and both agents (Prompt + Hosted) provisioned and verified — so you have a **green baseline** before starting the Core Labs. Complete them in order; Labs 01 and 02 are alternative paths (pick one).
+The Fundamentals track gets your Foundry substrate, models, and the Prompt Agent provisioned and verified — so you have a **green baseline** before starting the Core Labs. The Hosted Agent is built from scratch in the Core Labs Capstone (Lab 05). Complete Fundamentals in order; Labs 01 and 02 are alternative paths (pick one).
 
 | # | Lab | Loop node |
 |---|-----|-----------|
@@ -109,8 +109,7 @@ The Fundamentals track gets your Foundry substrate, models, and both agents (Pro
 | 2 | [Provision Foundry with the Portal](./labs/fundamentals/02-provision-portal.md) _(UI path)_ | Build |
 | 3 | [Deploy the required models](./labs/fundamentals/03-deploy-models.md) | Build |
 | 4 | [Create the Prompt Agent](./labs/fundamentals/04-create-prompt-agent.md) | Build |
-| 5 | [Deploy the Hosted Agent](./labs/fundamentals/05-deploy-hosted-agent.md) | Deploy |
-| 6 | [End-to-end verification](./labs/fundamentals/06-verify.md) | Evaluate |
+| 5 | [Smoke-test the Prompt Agent](./labs/fundamentals/05-verify.md) | Monitor |
 
 Start here → **[`labs/fundamentals/00-overview.md`](./labs/fundamentals/00-overview.md)**.
 

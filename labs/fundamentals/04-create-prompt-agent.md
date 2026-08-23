@@ -41,7 +41,7 @@ grounding), and a model — but no container. It's the fastest path to a working
 agent and the natural starting point for observability.
 
 Contrast with the **Hosted Agent** (`contoso-travel-concierge`) you'll deploy later in
-[Lab 05](./05-deploy-hosted-agent.md), which is a containerized, code-first
+the [Core Labs Capstone](../core/05-capstone-hosted.md), which is a containerized, code-first
 orchestrator that can coordinate multiple specialist sub-agents — deeper power,
 more moving parts.
 
@@ -66,7 +66,7 @@ By the end of the Fundamentals you'll have **both** flavors of the same Contoso
 Travel Concierge:
 
 1. the **Prompt Agent** you create here (Lab 04), and
-2. the **Hosted Agent** you deploy next (Lab 05).
+2. the **Hosted Agent** you build in the [Core Labs Capstone](../core/05-capstone-hosted.md).
 
 That's deliberate: running the same scenario in both forms lets you compare how
 each behaves across the Agent DevOps loop — the **observability**, **evaluation**,
@@ -182,8 +182,8 @@ code-first container, and seeing both makes those differences concrete.
 - You seeded the intentionally-weak **baseline v1** prompt so Core Lab 03 has
   something to improve.
 - You now have the **Prompt Agent** live. You'll deploy the **Hosted Agent**
-  next in Lab 05.
+  next in Lab 05 (verify).
 
 ## ➡️ Next
 
-**[Lab 05 — Deploy the Hosted Agent](./05-deploy-hosted-agent.md)**
+**[Lab 05 — Smoke-test the Prompt Agent](./05-verify.md)**

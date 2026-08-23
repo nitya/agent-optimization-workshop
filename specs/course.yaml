@@ -55,20 +55,12 @@ phases:
           - {type: data, name: flights}
           - {type: data, name: hotels}
           - {type: data, name: car_rentals}
-      - id: "05-deploy-hosted-agent"
-        title: Deploy the Hosted Agent (`azd deploy`)
-        loop_node: deploy
-        time_min: 15
-        prereqs: ["fundamentals/03-deploy-models"]
-        produces: [{type: config, name: hosted-agent-endpoint}]
-        consumes: []
-      - id: "06-verify"
-        title: Smoke-test both agents
+      - id: "05-verify"
+        title: Smoke-test the Prompt Agent
         loop_node: monitor
         time_min: 10
         prereqs:
           - "fundamentals/04-create-prompt-agent"
-          - "fundamentals/05-deploy-hosted-agent"
         produces: []
         consumes: []
 
@@ -80,7 +72,7 @@ phases:
         title: Core Labs overview
         loop_node: plan
         time_min: 5
-        prereqs: ["fundamentals/06-verify"]
+        prereqs: ["fundamentals/05-verify"]
         produces: []
         consumes: []
       - id: "01-observe-portal"

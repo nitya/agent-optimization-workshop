@@ -4,7 +4,8 @@
 > `gpt-5.4-judge` models, and wire up Application Insights and Log Analytics in
 > your Azure subscription with a single `azd provision` command. The container
 > registry and hosted agent come later in
-> [Lab 05](./05-deploy-hosted-agent.md).
+> [Core Lab 05 — Capstone](../core/05-capstone-hosted.md), where you build a
+> new hosted agent from scratch with the `microsoft-foundry` `create` sub-skill.
 > **Time:** ~15 min · **Prerequisites:** [Lab 00](./00-overview.md)
 >
 > ⏩ **Taking the portal path instead?** Skip to [Lab 02](./02-provision-portal.md).
@@ -124,7 +125,7 @@ Confirm you have:
 
    > 💡 **Why `azd provision` and not `azd up`?** `azd up` = `azd provision +
    > azd deploy`. This lab only needs the Foundry substrate — the hosted-agent
-   > **deploy** is a deliberate step in [Lab 05](./05-deploy-hosted-agent.md).
+   > **deploy** is deferred to the [Core Labs Capstone](../core/05-capstone-hosted.md).
    > Splitting them keeps failures easy to diagnose and retries cheap.
 
    `azd provision` runs the Bicep in [`../../infra/`](../../infra/):
@@ -157,7 +158,7 @@ Confirm you have:
 
    > 💡 **What's *not* here yet:** the Container Registry and the hosted agent
    > are **not** provisioned in this lab — you enable and create them when you
-   > deploy the hosted agent in [Lab 05](./05-deploy-hosted-agent.md).
+   > deploy the hosted agent in the [Core Labs Capstone](../core/05-capstone-hosted.md).
 
    > ⚠️ **Gotcha — soft-deleted resource blocks re-provision.** If you ran
    > `azd provision` in this repo before and see `A soft-deleted resource with
@@ -214,7 +215,7 @@ Application Insights, and a Log Analytics workspace.
 > go to **Build → Models**. Lab 03 walks through this.
 
 > 💡 The Container Registry, AI Search, and Storage show up **after** you enable
-> hosted-agent hosting in [Lab 05](./05-deploy-hosted-agent.md) — the
+> hosted-agent hosting in the [Core Labs Capstone](../core/05-capstone-hosted.md) — the
 > `azd env set ENABLE_HOSTED_AGENTS true && azd provision` step there adds them
 > to this same resource group, before you ever run `azd deploy`.
 
@@ -225,7 +226,7 @@ Application Insights, and a Log Analytics workspace.
 - `azd provision` stood up the Foundry substrate — account, project, the
   `gpt-5.4-mini` and `gpt-5.4-judge` models, and observability (App Insights +
   Log Analytics) — in one shot.
-- Splitting **provision** (this lab) from **deploy** ([Lab 05](./05-deploy-hosted-agent.md))
+- Splitting **provision** (this lab) from **deploy** ([Core Labs Capstone](../core/05-capstone-hosted.md))
   mirrors the Agent DevOps loop and keeps retries scoped.
 - Environment values are stored per-`azd env` and reused by later labs.
 - Next you'll **confirm the model deployments** and learn how to change them.
@@ -233,7 +234,7 @@ Application Insights, and a Log Analytics workspace.
 ## ➡️ Next
 
 **[Lab 03 — Deploy required models](./03-deploy-models.md)** to verify model deployments succeeded, or jump ahead to
-**[Lab 05 — Deploy the hosted agent](./05-deploy-hosted-agent.md)** to ship the
+**[Lab 03 — Deploy the required models](./03-deploy-models.md)**.
 container.
 
 If you're planning to use the **Prompt Agent** (Core Labs 01–04), continue with

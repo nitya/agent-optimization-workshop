@@ -1,7 +1,7 @@
 # Lab 00 — Core Labs overview
 
 > **What you'll do:** Preview the Core Labs journey and confirm your prerequisites.
-> **Time:** ~5 min · **Prerequisites:** [Fundamentals Lab 06](../fundamentals/06-verify.md)
+> **Time:** ~5 min · **Prerequisites:** [Fundamentals Lab 05](../fundamentals/05-verify.md)
 
 ## 🎯 Goal
 
@@ -32,7 +32,7 @@ Read the map:
 
 ## ✅ Verify
 
-Confirm you have both agents responding (from Fundamentals Lab 06). If not,
+Confirm you have the Prompt Agent responding (from Fundamentals Lab 05). If not,
 loop back before starting Lab 01.
 
 ## 🧠 Recap

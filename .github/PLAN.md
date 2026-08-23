@@ -286,10 +286,9 @@ Legend: ✅ complete · 🟡 stub/partial · ❌ not started · – not applicab
 | Portal provisioning | ✅ | – | ✅ | `fundamentals/02-provision-portal.md` — full body |
 | Model deployment | ✅ | ✅ | ✅ | `fundamentals/03-deploy-models.md` — full body (azd + portal paths) |
 | Prompt Agent creation | ✅ | – | ✅ | `fundamentals/04-create-prompt-agent.md` — references baseline artifact |
-| Hosted Agent source (`src/` + `src.original/`) | – | ✅ | ✅ | main.py, agent.yaml, Dockerfile, instructions/, scripts/ ported + rebranded |
-| Hosted Agent deploy lab | – | ✅ | ✅ | `fundamentals/05-deploy-hosted-agent.md` — full body |
+| Hosted Agent source (`src/` + `src.original/`) | – | ✅ | ✅ | main.py, agent.yaml, Dockerfile, instructions/, scripts/ ported + rebranded — currently deferred to Capstone (rebuilt via `create` sub-skill) |
 | Bicep infra (`infra/`) | – | ✅ | ✅ | main.bicep, params, core/{ai,host,monitor,search,storage} ported + rebranded |
-| Fundamentals verify lab | – | – | ✅ | `fundamentals/06-verify.md` — canonical question, both agents |
+| Fundamentals verify lab | – | – | ✅ | `fundamentals/05-verify.md` — canonical question, Prompt Agent only |
 | Core: observability in portal | ✅ | partial | ✅ | `core/01-observe-portal.md` — playground + live evaluators + traces |
 | Core: evaluation | ✅ | – | ✅ | `core/02-evaluate-portal.md` — batch eval against reference dataset |
 | Core: optimize with Foundry Skills | ✅ | – | ✅ | `core/03-optimize-skills.md` — Copilot + microsoft-foundry observe skill |

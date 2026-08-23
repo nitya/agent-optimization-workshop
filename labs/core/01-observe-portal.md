@@ -1,7 +1,7 @@
 # Core Lab 01 — Observe traces in the portal
 
 > **What you'll do:** Send prompts to the Prompt Agent in the Foundry playground, turn on live evaluators, and inspect the trace + trajectory views.
-> **Time:** ~20 min · **Prerequisites:** [Fundamentals Lab 06](../fundamentals/06-verify.md)
+> **Time:** ~20 min · **Prerequisites:** [Fundamentals Lab 05](../fundamentals/05-verify.md)
 
 ## 🎯 Goal
 

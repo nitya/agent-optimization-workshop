@@ -113,14 +113,11 @@ flowchart TB
         F["Foundry account + project<br/><i>created by Lab 01 or Lab 02</i>"]
         M["Lab 03 · Model deployments<br/>gpt-5.4-mini + gpt-5.4-judge"]
         P["Lab 04 · Prompt Agent<br/><i>lives inside the Foundry project</i>"]
-        H["Lab 05 · Hosted agent + registry + capability host<br/>azd env set ENABLE_HOSTED_AGENTS=true → azd provision → azd deploy"]
+        H["Lab 05 · Verify (Prompt Agent smoke test)"]
         F --> M --> P --> H
     end
 
-    V["Lab 06 · Verify (read-only)"]
-    RG --> V
-
-    Warn["⚠️ Mixed path (UI → CLI)?<br/>Before Lab 05, run <code>./scripts/link-portal-rg.sh</code><br/>to bind an azd env to the portal-created RG.<br/>Otherwise azd deploy creates a second RG."]:::warn
+    Warn["⚠️ Mixed path (UI → CLI)?<br/>If you plan to run azd from a portal-first setup,<br/>run <code>./scripts/link-portal-rg.sh</code> once<br/>to bind an azd env to the portal-created RG."]:::warn
     RG -.->|watch out| Warn
 
     classDef warn fill:#fef3c7,stroke:#f59e0b,color:#111827;

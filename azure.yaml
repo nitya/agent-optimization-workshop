@@ -10,9 +10,9 @@ infra:
   path: infra
   module: main
 services:
-  # Hosted agent (Lab 05). Deployed with `azd deploy contoso-travel-concierge`
+  # Hosted agent (Capstone). Deployed with `azd deploy contoso-travel-concierge`
   # into the Foundry project provisioned by infra/. Requires hosted-agent
-  # hosting to be enabled first (see labs/fundamentals/05-deploy-hosted-agent.md):
+  # hosting to be enabled first (see labs/core/05-capstone-hosted.md):
   #   azd env set ENABLE_HOSTED_AGENTS true && azd provision
   contoso-travel-concierge:
     project: src

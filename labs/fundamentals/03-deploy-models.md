@@ -77,7 +77,7 @@ flowchart LR
 > ```
 >
 > ⚠️ **Known limitation.** Once this override is set, later re-provisions
-> (e.g. enabling hosted agents in [Lab 05](./05-deploy-hosted-agent.md)) fail
+> (e.g. enabling hosted agents in the [Core Labs Capstone](../core/05-capstone-hosted.md)) fail
 > with `invalid character 'n' after object key:value pair`. Details in
 > [Troubleshooting · `invalid character 'n'`](../TROUBLESHOOTING.md#azd-provision-fails-with-invalid-character-n-after-object-keyvalue-pair).
 

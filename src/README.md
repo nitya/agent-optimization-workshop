@@ -35,4 +35,4 @@ That copies `src.original/` back over `src/`.
 azd ai agent run
 ```
 
-See `../labs/fundamentals/05-deploy-hosted-agent.md` for the full deploy flow.
+See `../labs/core/05-capstone-hosted.md` for the full deploy flow.

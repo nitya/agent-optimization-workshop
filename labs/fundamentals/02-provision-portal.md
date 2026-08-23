@@ -76,9 +76,9 @@ flowchart LR
    <!-- TODO(nitya): screenshot showing where the project endpoint appears in Overview -->
 
 > 💡 **Tip — moving to CLI later?** If you plan to run the CLI-only steps in
-> [Lab 05](./05-deploy-hosted-agent.md) to deploy the hosted agent, you'll
+> the [Core Labs Capstone](../core/05-capstone-hosted.md), you'll
 > run [`scripts/link-portal-rg.sh`](../../scripts/link-portal-rg.sh) once
-> before Lab 05 Step 1. It binds an `azd env` to this portal-created RG so
+> before running any `azd deploy`. It binds an `azd env` to this portal-created RG so
 > `azd provision` reuses it — no second resource group. You don't need to run
 > it now.
 
