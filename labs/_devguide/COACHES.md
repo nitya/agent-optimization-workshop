@@ -567,12 +567,12 @@ Before we touch the Foundry portal, we need a resource group, a Foundry project,
 
 #### How are we solving it?
 
-We run **one script** — [`labs/_devguide/01-provision.sh`](01-provision.sh) — that drives `azd provision` against the repo's tested Bicep with `ENABLE_HOSTED_AGENTS=false`. Result: the fundamentals slice only. When we reach the capstone, `02-hosted-agent.sh` flips the flag and re-provisions into the SAME resource group; Bicep's deterministic resource-token leaves everything already there untouched and only adds the hosted-agent modules.
+We run **one script** — [`labs/_devguide/01-provision.sh`](01-provision.sh) — that drives `azd provision` against the repo's tested Bicep with `ENABLE_HOSTED_AGENTS=false`. Result: the fundamentals slice only. When we reach the capstone, `02-enable-hosted-infra.sh` flips the flag and re-provisions into the SAME resource group; Bicep's deterministic resource-token leaves everything already there untouched and only adds the hosted-agent modules.
 
 Why `azd` (not a hand-rolled `az` script)?
 
 - The Bicep already declares the full stack, including the developer RBAC. We'd reimplement it in bash and drift on every infra change.
-- Bicep's deterministic resource-token is what makes the reuse guarantee work in `02-hosted-agent.sh`.
+- Bicep's deterministic resource-token is what makes the reuse guarantee work in `02-enable-hosted-infra.sh`.
 - If we were only ever building prompt agents, a series of `az` commands or a simpler "standard agents" `azd` template would be enough. Our goal is one template that also supports the hosted-agent capstone.
 
 Every run gets a **fresh random 4-hex suffix** for the azd env name and the resource group name. That side-steps the soft-deleted Cognitive Services collision that would otherwise block a re-run. To re-enter an existing env, pass `AZD_ENV_SUFFIX=<same-4-char>`.
@@ -646,7 +646,7 @@ SUCCESS: Your application was provisioned in Azure in 1 minute 48 seconds.
 
 ==> Summary
   ✓ fundamentals ready. next: open the Foundry portal for §7.3.
-         when you reach the capstone, run: ./labs/_devguide/02-hosted-agent.sh
+         when you reach the capstone, run: ./labs/_devguide/02-enable-hosted-infra.sh then ./03-capstone-agent.sh
 
          to reuse this env in a later shell:
              AZD_ENV_SUFFIX=8a40 ./labs/_devguide/01-provision.sh
@@ -670,7 +670,7 @@ Once the script reports "fundamentals ready", we cross-check what got created in
 
 - The Bicep provisions ten resources — resource group, Foundry account, both model deployments (`gpt-5.4-mini` + `gpt-5.4-judge`), Log Analytics, Foundry project, Application Insights, Container Registry, plus two Foundry project connections (App Insights + ACR).
 - With `ENABLE_HOSTED_AGENTS=false`, the capability host is skipped. The container registry is still created because it's a Foundry project connection, not a hosted-agent-only dependency — but it stays idle until the capstone.
-- The resource-token (`XXXXXXXXXXXXX` in the example above) is deterministic per (subscription, resource group, location). Same RG next time we run `azd provision` in this env → same resource names → Bicep treats existing resources as unchanged. This is what makes `02-hosted-agent.sh` safe to run against the same env later.
+- The resource-token (`XXXXXXXXXXXXX` in the example above) is deterministic per (subscription, resource group, location). Same RG next time we run `azd provision` in this env → same resource names → Bicep treats existing resources as unchanged. This is what makes `02-enable-hosted-infra.sh` safe to run against the same env later.
 - The developer principal is granted two roles at the Foundry account scope: **Foundry User** (data-plane access to models and projects) and **Foundry Project Manager** (project administration). When the hosted-agent bits are added in §7.‹future›, we also verify **Storage Blob Data Contributor** on the eval-dataset storage account.
 - A `.env` at repo root is written from `sample.env`, filled in with values from `azd env get-values`. Local scripts and tooling can then load Foundry endpoint, App Insights connection string, and model deployment names without an `azd env select` call.
 
@@ -682,7 +682,7 @@ Once the script reports "fundamentals ready", we cross-check what got created in
 
 #### Tips
 
-- 💡 A resource-group name like `rg-contoso-travel-8a40` is *deliberately* not memorable. When we return to this Codespace later, `azd env list` or `ls .azure/` tells us which env is current. `02-hosted-agent.sh` and `03-capstone-agent.sh` auto-pick the most recent `contoso-travel-*` env, so we usually don't need to remember the suffix.
+- 💡 A resource-group name like `rg-contoso-travel-8a40` is *deliberately* not memorable. When we return to this Codespace later, `azd env list` or `ls .azure/` tells us which env is current. `02-enable-hosted-infra.sh` and `03-capstone-agent.sh` auto-pick the most recent `contoso-travel-*` env, so we usually don't need to remember the suffix.
 - 💡 The suffix collision-check inside the script also probes for **soft-deleted** Cognitive Services accounts under the target RG. If a random hex somehow collided with a purged-but-not-yet-drained account name, the script would pick a different suffix silently.
 - ⚠️ **Cost note:** everything in the fundamentals slice is either free or metered per-request. The Container Registry is the only always-on Basic-tier resource — a few USD/month idle. Teardown is `azd down` inside the env folder.
 - 🔎 **Walkthrough note:** the current [Lab 01](../fundamentals/01-provision-azd.md) uses a fixed `rg-contoso-travel` (no suffix). The devguide switches to a random suffix so re-runs don't collide with soft-deleted resources; the labs will pick this pattern up in the next content pass.
@@ -1082,3 +1082,90 @@ The agent should now compose across three retrievals in one response: outbound f
 - 💡 If turn 2 comes back **without citations**, the retriever probably hasn't finished warming — retry the same reply in ~10 seconds. If it still returns no citations, revisit §7.6 step 3 and confirm the index built.
 - ⚠️ **Do not** run any of the three turns twice back to back with the same phrasing. The playground caches recent responses aggressively; if the second run looks suspiciously identical to the first, that's the cache, not a real invocation. Change one word to bypass.
 - 🔎 **Walkthrough note:** the current [Lab 05 — Smoke-test the Prompt Agent](../fundamentals/05-verify.md) shows only a single-turn canonical question. The devguide extends that to a three-turn conversation because it demonstrates the **v3 weakness → grounded recovery → cross-dataset composition** story that anchors the rest of the workshop.
+
+### 7.8 Handoff — from Fundamentals to Core Labs
+
+#### Developer question
+
+> ❓ *What did I actually just build, what's still unmeasured, and what do the Core Labs give me that Fundamentals didn't?*
+
+#### What problem are we solving?
+
+We've reached a natural seam. Fundamentals leaves us with a working prompt agent grounded in real data, but only a subjective sense of quality. The Core Labs will replace that gut feel with numbers. Before we cross the seam, we owe ourselves a one-screen summary — what's set up, what's not, and what's about to change.
+
+#### How are we solving it?
+
+We name what Fundamentals produced, name what it deliberately did **not** produce, and name the Core Lab that fills each gap.
+
+**What Fundamentals gave us:**
+
+- A random-suffix azd env (e.g., `contoso-travel-8a40`) and matching resource group.
+- A Foundry project with two model deployments — `gpt-5.4-mini` (Concierge) and `gpt-5.4-judge` (evaluator judge).
+- Log Analytics + Application Insights wired to the project (traces flow into App Insights automatically).
+- A prompt agent `contoso-travel-concierge-prompt` at **v3**: instructions from the baseline seed, three JSON datasets attached as `contoso-travel-index`, Web Search removed.
+- A repo-root `.env` populated with the Foundry project endpoint, model deployment names, and App Insights connection string.
+
+**What Fundamentals deliberately did not give us:**
+
+- **Rigorous evaluation.** We ran three smoke prompts by eye. No dataset, no metrics, no comparison.
+- **Trace anatomy.** We noted citations appear; we haven't looked at a trace record, span, or trajectory.
+- **Improved instructions.** The baseline is intentionally weak. Turn 1 of the canonical question over-asks — we know it and we did not fix it.
+- **Production monitoring.** No dashboards, no App Insights queries, no alerts.
+- **A hosted agent.** Deferred entirely to the Capstone, scaffolded fresh from a curated Foundry sample.
+
+**Where the Core Labs pick up:**
+
+```mermaid
+flowchart LR
+    F[Fundamentals §7<br/>Plan + Build] --> O[Core Lab 01<br/>Observe]
+    O --> E[Core Lab 02<br/>Evaluate]
+    E --> Op[Core Lab 03<br/>Optimize]
+    Op --> M[Core Lab 04<br/>Monitor]
+    M --> C[Capstone Core Lab 05<br/>Hosted agent + repeat the loop]
+
+    classDef done fill:#dcfce7,stroke:#166534,color:#064e3b;
+    classDef next fill:#dbeafe,stroke:#1e40af,color:#1e3a8a;
+    classDef later fill:#fef3c7,stroke:#a16207,color:#78350f;
+    class F done
+    class O,E,Op,M next
+    class C later
+```
+
+| Gap in Fundamentals | Where it gets filled |
+|---|---|
+| Trace anatomy (spans, actions, trajectories) | Core Lab 01 — Observe |
+| Rigorous quality + safety measurement across a dataset | Core Lab 02 — Evaluate |
+| Turning the baseline weakness into a stronger version | Core Lab 03 — Optimize |
+| Production dashboards + App Insights queries | Core Lab 04 — Monitor |
+| Hosted agent + apply the same loop through code | Capstone (Core Lab 05) |
+
+#### Exercise: lab steps
+
+Before starting Core Lab 01, capture these three values from your `.env` (or run `azd env get-values` to see them):
+
+- **Project endpoint** — `AZURE_AI_PROJECT_ENDPOINT`
+- **Agent name** — `contoso-travel-concierge-prompt`
+- **Concierge model deployment** — `AZURE_AI_MODEL_DEPLOYMENT_NAME` (`gpt-5.4-mini`)
+
+Every Core Lab prompt to Copilot uses at least the first two, and the third shows up whenever we talk about model choice.
+
+Related lab: [Core Lab 00 — Overview](../core/00-overview.md) → [Core Lab 01 — Observe traces](../core/01-observe-portal.md).
+
+#### What did we learn?
+
+- Fundamentals is not the loop — it's the **starting line**. The DevOps loop begins in earnest at Core Lab 01.
+- The prompt agent's **v3 weakness is a feature of the workshop**, not a bug in our setup. Core Lab 03 exists because that weakness exists.
+- The hosted agent is a **separate story with the same requirements**. The Capstone shows both stories can produce comparable outcomes on the same data — an architectural choice, not a quality gap.
+- Everything Fundamentals set up is reused by Core and Capstone. Same RG, same models, same App Insights, same index. Nothing is thrown away.
+
+#### Extension
+
+- Ask Copilot: *"Using the microsoft-foundry `deploy` sub-skill, summarize the current state of the `contoso-travel-concierge-prompt` agent in this Foundry project — model, instructions, attached indexes, current version — and confirm nothing is missing before I start the Core Labs."*
+- Sketch what you'd expect the Core Lab 03 optimization to change about the seed prompt. Come back to it after Lab 03 and see how close you were.
+
+#### Tips
+
+- 💡 If your `.env` is missing any of the three values above, re-run `AZD_ENV_SUFFIX=<your-suffix> ./labs/_devguide/01-provision.sh`. Step 5 (Populate `.env`) is idempotent — safe to re-run any time.
+- 💡 The Core Labs run **against the same Foundry project** we provisioned. Do not create a second azd env unless you specifically want a clean-slate walkthrough.
+- 🧭 Once the Capstone chapter is ready, the hosted-agent flow is: `01-provision.sh` → `02-enable-hosted-infra.sh` → `03-capstone-agent.sh`. First two are done or ready; the third is a stub we'll flesh out with the walkthrough.
+- 🔎 **Walkthrough note:** the current [Fundamentals Lab 05 — Verify](../fundamentals/05-verify.md) ends by pointing at Core Lab 00. The devguide adds this explicit handoff section because naming what's unmeasured makes the Core Labs' purpose land better than "next lab, please."

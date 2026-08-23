@@ -7,7 +7,8 @@
 #   - The repo's infra/main.bicep already declares the full Foundry setup —
 #     RG, account, project, both model deployments, Log Analytics,
 #     App Insights, storage, connections, and user RBAC.
-#   - Bicep's deterministic resource-token is what lets 02-hosted-agent.sh
+#   - Bicep's deterministic resource-token is what lets
+#     02-enable-hosted-infra.sh (and 03-capstone-agent.sh)
 #     re-provision the SAME RG later with ENABLE_HOSTED_AGENTS=true and only
 #     add hosted-agent modules — a shell provisioner would need to stitch
 #     that state itself.
@@ -33,7 +34,8 @@
 #   - Log you in without prompting.
 #   - Purge soft-deleted resources for you (prints the command).
 #   - Provision hosted-agent extras (ACR, capability host). For that,
-#     run ./02-hosted-agent.sh — it reuses this same azd env + RG.
+#     run ./02-enable-hosted-infra.sh (adds ACR + capability host) and then
+#     ./03-capstone-agent.sh (scaffolds and deploys the Capstone hosted agent).
 #
 # Env vars (all optional):
 #   AZD_ENV_SUFFIX  4-char token added to env + RG names. Default: random hex.
@@ -300,7 +302,7 @@ fi
 printf "\n%s==>%s %sSummary%s\n" "$BLUE" "$RESET" "$BOLD" "$RESET"
 if (( FAILED == 0 && WARNED == 0 )); then
     printf "  %s✓%s fundamentals ready. next: open the Foundry portal for §7.2.\n" "$GREEN" "$RESET"
-    printf "         when you reach the capstone, run: ./labs/_devguide/02-hosted-agent.sh\n"
+    printf "         when you reach the capstone, run: ./labs/_devguide/02-enable-hosted-infra.sh then ./03-capstone-agent.sh\n"
     printf "\n         to reuse this env in a later shell:\n"
     printf "             %sAZD_ENV_SUFFIX=%s ./labs/_devguide/01-provision.sh%s\n" "$BOLD" "$AZD_ENV_SUFFIX" "$RESET"
     exit 0

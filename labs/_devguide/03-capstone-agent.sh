@@ -7,9 +7,14 @@
 # detect the already-scaffolded folder, the existing azd service entry, and the
 # deployed agent, then skip past those steps.
 #
-# Why a separate script (not 02-hosted-agent.sh)?
-#   - 02-hosted-agent.sh deploys the ORIGINAL prompt-agent-turned-hosted at
-#     `src/`. That agent stays as the fundamentals + core baseline.
+# Why a separate script (not 02-enable-hosted-infra.sh)?
+#   - 02-enable-hosted-infra.sh adds the shared hosted-agent platform bits
+#     (ACR + capability host + RBAC). It deliberately does NOT deploy an
+#     agent — the workshop no longer ships the original src/ hosted agent.
+#   - This script uses the microsoft-foundry `create` sub-skill to scaffold a
+#     FRESH hosted agent into src-capstone/, then registers it as a new azd
+#     service and deploys it. Same RG. Same Foundry project. Reuse guarantee
+#     still holds via Bicep's deterministic resource-token.
 #   - The capstone story wants a FRESH scaffold produced by the microsoft-foundry
 #     `create` sub-skill, landing in `src-capstone/`, and registered as a new
 #     azd service so both agents coexist in the same Foundry project.
@@ -17,7 +22,7 @@
 #
 # Prerequisites:
 #   - 01-provision.sh has been run (Foundry account + project + models exist).
-#   - 02-hosted-agent.sh has been run at least once (ENABLE_HOSTED_AGENTS=true,
+#   - 02-enable-hosted-infra.sh has been run at least once (ENABLE_HOSTED_AGENTS=true,
 #     ACR + capability host exist).
 #
 # What it does:
@@ -124,7 +129,7 @@ fi
 
 hosted_flag=$(cd "$REPO_ROOT" && azd env get-value ENABLE_HOSTED_AGENTS 2>/dev/null || echo "false")
 if [[ "$hosted_flag" != "true" ]]; then
-    fail "ENABLE_HOSTED_AGENTS is not true on '$AZD_ENV_NAME'. run ./02-hosted-agent.sh first."
+    fail "ENABLE_HOSTED_AGENTS is not true on '$AZD_ENV_NAME'. run ./02-enable-hosted-infra.sh first."
 fi
 
 project_id=$(cd "$REPO_ROOT" && azd env get-value AZURE_AI_PROJECT_ID 2>/dev/null || true)

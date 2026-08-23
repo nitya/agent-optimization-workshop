@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 02-hosted-agent.sh — add hosted-agent infra to the SAME azd env and deploy.
+# 02-enable-hosted-infra.sh — add hosted-agent infra to the SAME azd env.
 #
 # Idempotent. Safe to re-run. Reuses the resource group and Foundry account
 # already created by 01-provision.sh — Bicep's deterministic resource-token
@@ -11,9 +11,13 @@
 #   1. Confirms auth + a target azd env from 01-provision.sh.
 #   2. Sets ENABLE_HOSTED_AGENTS=true on that env.
 #   3. Runs `azd provision` to add the hosted-agent modules.
-#   4. Runs `azd deploy` to build and push the hosted agent.
-#   5. Verifies developer RBAC still includes Storage/AI/Foundry roles.
-#   6. Refreshes .env with the new hosted-agent env values.
+#   4. Verifies developer RBAC still includes Storage/AI/Foundry roles.
+#   5. Refreshes .env with the new hosted-agent env values.
+#
+# What it does NOT do:
+#   - Deploy any hosted agent code. The workshop deploys the CAPSTONE
+#     hosted agent (scaffolded fresh into src-capstone/) via
+#     ./03-capstone-agent.sh — run that AFTER this script succeeds.
 #
 # Env vars:
 #   AZD_ENV_NAME  Explicit azd env name. If not set, uses the most recent
@@ -123,24 +127,11 @@ if ask_yes "run 'azd provision' now? (~2 minutes; reuses existing Foundry resour
         fail "azd provision failed; see labs/TROUBLESHOOTING.md"
     fi
 else
-    warn "skipped azd provision — hosted agent deploy will fail without it"
+    warn "skipped azd provision — capstone deploy will fail without it"
 fi
 
-# ---------- 4. deploy ----------
-section "4. Deploy the hosted agent"
-
-if ask_yes "run 'azd deploy' now? (~3-5 minutes; builds image and pushes to ACR)"; then
-    if (cd "$REPO_ROOT" && azd deploy); then
-        pass "azd deploy complete"
-    else
-        fail "azd deploy failed; see labs/TROUBLESHOOTING.md"
-    fi
-else
-    warn "skipped azd deploy"
-fi
-
-# ---------- 5. verify RBAC ----------
-section "5. Developer RBAC (post-provision check)"
+# ---------- 4. verify RBAC ----------
+section "4. Developer RBAC (post-provision check)"
 
 user_oid=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)
 scope="/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$RG_NAME"
@@ -167,8 +158,8 @@ for role in "${wanted[@]}"; do
     fi
 done
 
-# ---------- 6. refresh .env ----------
-section "6. Refresh .env"
+# ---------- 5. refresh .env ----------
+section "5. Refresh .env"
 
 if [[ -f "$REPO_ROOT/sample.env" ]]; then
     tmp=$(mktemp)
@@ -206,10 +197,10 @@ fi
 # ---------- summary ----------
 printf "\n%s==>%s %sSummary%s\n" "$BLUE" "$RESET" "$BOLD" "$RESET"
 if (( FAILED == 0 && WARNED == 0 )); then
-    printf "  %s✓%s hosted agent provisioned and deployed.\n" "$GREEN" "$RESET"
+    printf "  %s✓%s hosted-agent infra ready. next: ./labs/_devguide/03-capstone-agent.sh\n" "$GREEN" "$RESET"
     exit 0
 elif (( FAILED == 0 )); then
-    printf "  %s!%s hosted agent step complete with warnings above.\n" "$YELLOW" "$RESET"
+    printf "  %s!%s hosted-agent infra ready with warnings above.\n" "$YELLOW" "$RESET"
     exit 0
 else
     printf "  %s✗%s %d step(s) failed. address them, then re-run this script.\n" "$RED" "$RESET" "$FAILED"
