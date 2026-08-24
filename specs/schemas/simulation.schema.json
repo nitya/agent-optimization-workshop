@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "simulator scenario artifact (JSONL entry)",
+  "description": "One line of an artifacts/datasets/reference/simulation-*.jsonl file. Feeds the Foundry adversarial simulator, which generates multi-turn conversations from each scenario.",
+  "type": "object",
+  "required": ["id", "test_case_description", "desired_num_turns"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1, "pattern": "^[a-z0-9_]+$"},
+    "test_case_description": {"type": "string", "minLength": 40},
+    "desired_num_turns": {"type": "integer", "minimum": 1, "maximum": 15}
+  },
+  "additionalProperties": false
+}

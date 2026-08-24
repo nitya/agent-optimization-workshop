@@ -22,6 +22,7 @@ SCHEMA_FILE = {
     "datasets":   "dataset.schema.json",
     "evaluators": "evaluator.schema.json",
     "prompts":    "prompt.schema.json",
+    "simulator":  "simulation.schema.json",
 }
 
 
@@ -63,10 +64,12 @@ def test_shipped_reference_artifacts_validate():
     for kind, folder in ARTIFACT_DIR.items():
         schema = _load_schema(kind)
         for p in folder.glob("*.jsonl"):
+            simulator = kind == "datasets" and p.name.startswith("simulation-")
+            active_schema = _load_schema("simulator") if simulator else schema
             with open(p) as f:
                 for i, line in enumerate(f, start=1):
                     line = line.strip()
                     if not line:
                         continue
                     obj = json.loads(line)
-                    validate(obj, schema)
+                    validate(obj, active_schema)

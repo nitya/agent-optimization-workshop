@@ -37,6 +37,14 @@
 8. [Core Labs walkthrough](#8-core-labs-walkthrough)
    - 8.0 [What Core Labs unlock](#80-what-core-labs-unlock)
    - 8.1 [Observe traces in the portal](#81-observe-traces-in-the-portal)
+   - 8.2 [Evaluate — batch scoring across a representative set](#82-evaluate--batch-scoring-across-a-representative-set)
+   - 8.3 [Optimize — Copilot-driven prompt improvement loop](#83-optimize--copilot-driven-prompt-improvement-loop)
+   - 8.4 [Monitor — production traffic + Ask AI + Observability agent](#84-monitor--production-traffic--ask-ai--observability-agent)
+   - 8.5 [Handoff — from Core Labs to Capstone](#85-handoff--from-core-labs-to-capstone)
+9. [Capstone walkthrough — the hosted agent](#9-capstone-walkthrough--the-hosted-agent)
+   - 9.0 [What Capstone unlocks](#90-what-capstone-unlocks)
+   - 9.1 [What we'll walk (planned)](#91-what-well-walk-planned)
+   - 9.2 [Prerequisites — what to have running](#92-prerequisites--what-to-have-running)
 
 Numbering runs `chapter.section` (for example, `6.1`). If a step is unclear, cite its number — for example, "stuck on 7.1 tips".
 
@@ -1280,6 +1288,39 @@ Categories represented: `flight`, `hotel`, `car`, `multi` (cross-dataset composi
 
 A smaller companion set, [`evaluation-data-v1.jsonl`](../../artifacts/datasets/reference/evaluation-data-v1.jsonl), keeps 10 grounded rows for fast teaching demos that don't need the tier machinery.
 
+A third companion set, [`simulation-prompts-v1.jsonl`](../../artifacts/datasets/reference/simulation-prompts-v1.jsonl), is different in kind: it holds **28 scenario descriptions** — not literal user queries. Each row describes a traveler *situation* the **adversarial simulator** turns into a full multi-turn conversation by generating both sides. Same use-case coverage as `sample-prompts-v1.jsonl` (grounded flight/hotel/car, multi-part composition, clarification, out-of-scope, adversarial injection, edge no-match, ambiguous boundary), but consumed by the simulator instead of the playground.
+
+Fields — matching the [Foundry adversarial simulator input schema](https://learn.microsoft.com/azure/ai-foundry/how-to/develop/simulator-interaction-data):
+
+| Field | Purpose | Example (row 1) |
+|---|---|---|
+| `id` | Snake_case identifier; unique per row. | `"chicago_rome_business_baseline"` |
+| `test_case_description` | Persona-shaped scenario the simulator uses to generate both traveler and agent turns. | *"Traveler wants to book a business-class flight from Chicago to Rome for a work trip under $2,500. Starts with the ask, then provides travel dates when the agent asks. Grounded lookup should return CT-FL-014."* |
+| `desired_num_turns` | Target conversation length. Simulator caps at its own `max_turns` setting. | `3` |
+
+Sample row (row 1 verbatim):
+
+```jsonc
+{
+  "id": "chicago_rome_business_baseline",
+  "test_case_description": "Traveler wants to book a business-class flight from Chicago to Rome for a work trip under $2,500. Starts with the ask, then provides travel dates when the agent asks. Grounded lookup should return CT-FL-014.",
+  "desired_num_turns": 3
+}
+```
+
+Recommended simulator settings for a workshop run:
+
+| Setting | Value | Effect |
+|---|---|---|
+| `max_turns` per conversation | **5** | Caps the 5 longest scenarios (negotiation / multi-city) so they still complete inside the frame. |
+| `num_conversations` per scenario | **3** | Three independent generations per row → surfaces stochastic variance without runaway cost. |
+| **Total generated conversations** | **84** | 28 scenarios × 3 runs — ~5–10 min end-to-end depending on backend. |
+
+Two-line mental model:
+
+- **`sample-prompts-v1.jsonl`** = the seed set we hand-send to the playground (§7 + §8.1); one-shot user queries.
+- **`simulation-prompts-v1.jsonl`** = the scenario set the adversarial simulator expands into multi-turn traffic; feeds §8.4 Monitor's "many-turn" view and §8.2's synthetic-eval variant.
+
 #### Exercise: lab steps
 
 There's no hands-on exercise for this section. Read the map above once and glance at the record shape below, then move to §8.1.
@@ -1729,6 +1770,8 @@ The three views tell you *what's there*. The filters tell you *what deserves att
 
     > 🧭 **The workflow you just did — "filter to find the outlier, drill in to diagnose it" — is the entire §8.3 Optimize opening move.** Every optimization cycle starts with a filter that surfaces one class of failure (slow / low-quality / low-safety), a click into the worst example, and a read of the metadata to name the root cause. Remember the shape; you'll do it four more times before this workshop is over.
 
+    > 🧭 **Same trace, different surface.** Everything on this Traces tab is being emitted to Application Insights as OpenTelemetry spans. When we get to **§8.4 Monitor**, we'll look at this same trace from the Portal's Application Insights blade (or a Grafana workbook) — Trace Search, Failures, and Performance panes give you distribution-level views (P50 / P95 latency, error rate, cost per turn over time) that this per-turn Foundry surface deliberately doesn't. Rule of thumb: **Foundry Traces for "read one turn end-to-end," App Insights for "read many turns at scale."**
+
 ### 🧠 What we learned — §8.1 Observe
 
 Vocabulary that will carry through the rest of Core Labs:
@@ -1781,3 +1824,881 @@ Copilot will query the Application Insights `traces` and `customEvents` tables u
 - **Refresh the trace tree if a span looks empty.** The Metadata column populates lazily; large payloads (retrieved chunks especially) sometimes need a click-away/click-back to render.
 - **Don't paste raw span JSON into GitHub issues.** Subscription IDs, Application Insights iKeys, and blueprint GUIDs are all in there. Screenshot the specific field, or redact before sharing.
 
+### 8.2 Evaluate — batch scoring across a representative set
+
+#### Developer question
+
+> ❓ *Now that I can read one trace, how do I know if the agent is good enough — across many turns, many kinds of travelers, and against a fixed reference?*
+
+#### What problem are we solving?
+
+§8.1 gave us the tools to read *one* turn. That's necessary but not sufficient. Before we optimize (§8.3) or ship (§8.5), we need **numbers over a set** — an aggregate signal we can regress against later. Evaluation is what turns a Foundry agent from "feels okay in the playground" into "measured against a benchmark that catches regressions." Every Core Lab after this one *depends on* the baseline scores this one produces.
+
+#### How are we solving it?
+
+Foundry gives us **two evaluation paths** that use the same evaluators but different data shapes. We walk both — start with the noisier, more realistic one, then contrast with the cleaner reference set.
+
+- **Path 1 — simulated multi-turn conversations.** Feed the adversarial simulator `simulation-prompts-v1.jsonl` (§8.0). It generates ~84 full conversations, we score every turn in every conversation. Closest to production traffic; noisiest signal; catches multi-turn failure modes (drift, forgetting, over-commitment) the single-turn set can't.
+- **Path 2 — the curated single-turn reference set.** Score `evaluation-data-v2.jsonl` (§8.0) one query at a time against per-row `ground_truth` and `expected_behavior`. Clean signal; regression-quality; the fixed reference frame we compare every future run against.
+
+Both paths land in the **same Evaluations dashboard** and produce the **same evaluator scores** — the difference is what "one row" means (a conversation vs. a query) and which weaknesses each surfaces.
+
+#### 8.2.1 Path 1 — simulated multi-turn conversations
+
+**Entry point — the agent's Evaluations tab.** Every evaluation in this section starts here. Note the mental shift: **§8.1 lived under Traces (past runs); §8.2 lives under Evaluations (planned runs against a reference).** Same agent, adjacent tabs, opposite time direction.
+
+1. **Open Evaluations for the prompt agent.** From the agent nav (Playground · Details · Traces · Monitor · **Evaluation** · Optimize), click Evaluations.
+
+   ![Evaluations tab landing for the prompt agent](assets/8-2-p1-01.png)
+
+2. **Create a new evaluation.** Click the "+ New evaluation" (or equivalent) button top-right. The wizard opens.
+
+   ![New evaluation dialog — wizard opens](assets/8-2-p1-02.png)
+
+3. **Set scope — Individual turns vs Full conversations. Pick Full.** This is the first branching decision. *Individual turns* scores every assistant response in isolation (Path 2 shape); *Full conversations* scores multi-turn dialogs end-to-end. For Path 1 we pick **Full conversations** so multi-turn drift and forgetting can register.
+
+   ![Scope picker — Full conversations selected](assets/8-2-p1-03.png)
+
+4. **Set frequency — One time vs Recurring. Pick One time.** *Recurring* schedules the run on a cadence (used in §8.4 Monitor as a continuous-eval hook); *One time* runs once now and stops. For the walkthrough we pick **One time**.
+
+   ![Frequency picker — One time selected](assets/8-2-p1-04.png)
+
+5. **Set conversation data source — simulated vs upload existing. Pick Simulated.** *Upload existing* would let you supply pre-recorded conversations (or the curated single-turn set — that's Path 2). *Simulated* runs the adversarial simulator to generate conversations on the fly.
+
+   ![Data source picker — Simulated selected](assets/8-2-p1-05.png)
+
+6. **Upload the scenarios file — `simulation-prompts-v1.jsonl`.** The 28-row scenario set from §8.0. The simulator will expand each row into `desired_num_turns` × `num_conversations` full conversations.
+
+   ![Upload simulation-prompts-v1.jsonl](assets/8-2-p1-06.png)
+
+7. **Preview the uploaded dataset.** The wizard shows the first few rows of `simulation-prompts-v1.jsonl` — `id`, `test_case_description`, `desired_num_turns`. Sanity-check that the schema was parsed correctly and the scenarios look right before moving on.
+
+   ![Dataset preview — first rows of the uploaded scenarios](assets/8-2-p1-07.png)
+
+8. **Simulation model + simulation settings.** Second half of the data-source configuration. Pick the **simulation model** (which model *plays the traveler*, generating user turns), and the simulation settings (`max_turns = 5`, `num_conversations_per_scenario = 3` from §8.0 → **84 conversations** total).
+
+   ![Simulation model + settings — max_turns 5, 3 convos per scenario](assets/8-2-p1-08.png)
+
+   > 🧠 **Two models in one run.** The *simulation model* impersonates the traveler; the *agent* (our `contoso-travel-concierge-prompt:3`) is what's being scored. They talk to each other for up to `max_turns`, and the evaluators score the resulting dialog. Keep them distinct in your head — a stronger simulation model produces harder traveler prompts, not necessarily better scores.
+
+9. **Confirm and generate simulated data.** The wizard summarizes the simulation parameters one more time before spending compute to generate the 84 conversations.
+
+   ![Confirmation — generate simulated data](assets/8-2-p1-09.png)
+
+10. **Configure the agent prompt.** Optional override for the system/developer instructions the agent runs with during the evaluation. Leave as-is to score the current live version (that's usually what you want for a baseline); override when you're A/B-testing a candidate instruction change before promoting it.
+
+    ![Configure agent prompt — leave as-is for baseline](assets/8-2-p1-10.png)
+
+    > 💡 **This is the §8.3 seam.** In §8.3 Optimize we'll come back to this exact screen and paste a *candidate* instruction here to score it against the same 84 conversations — that's how you A/B two instructions without redeploying the agent.
+
+11. **Evaluators — Agents + Quality selected.** Auto-selected set for full-conversation scope: **Agents** family (Intent Resolution, Task Adherence, Tool Call Accuracy, Task Success) and **Quality** family (Relevance, Coherence, Fluency, Groundedness). This is the "same evaluators that judged one turn now judge 84 conversations" moment from §8.1.
+
+    ![Evaluator selection — Agents + Quality](assets/8-2-p1-11.png)
+
+12. **Review and submit.** Full configuration summary — scope, frequency, data source, simulation model + settings, agent prompt, evaluators. Last stop before the run starts.
+
+    ![Review + submit evaluation](assets/8-2-p1-12.png)
+
+13. **Run appears in the evaluations list — executing.** Landing back on the agent's Evaluation tab, the new run shows up in the list with a status like *Simulating* / *Evaluating* / *Running*. Wait ~5–10 min for completion; the summary + failure-drill views live inside this row once it finishes (same UI shape as Path 2 steps 9–10 below).
+
+    ![Evaluation in the list — executing status](assets/8-2-p1-13.png)
+
+> 🧭 **What Path 1 surfaces that Path 2 won't.** Multi-turn drift, context-window forgetting, over-commitment across turns, adversarial escalation patterns. The scenarios in `simulation-prompts-v1.jsonl` were designed for this — `chicago_rome_full_trip_budget_conflict` and `date_flexible_negotiation` (both capped at 5 turns) are the most valuable rows for this reason.
+
+> 💡 **Cost note.** 84 conversations × ~5 turns × 11 evaluators = ~4,600 evaluator calls. On `gpt-5.4-mini` as the judge, budget ~$1–$3 depending on token counts. This is the reason we don't run simulated eval on every commit — it's a **weekly / pre-release** signal, not a **per-PR** signal (Path 2 is the per-PR signal).
+
+> 💡 **Roll your own scenarios — hand a sample to Copilot.** Foundry's simulator setup surfaces a **sample scenarios file** (a small NDJSON with a couple of example rows in the exact schema it expects). Download it, drop it in this workspace, and ask Copilot Chat:
+>
+> > *Here is a Foundry adversarial-simulator sample scenarios file (attach it). Using the same schema (`id`, `test_case_description`, `desired_num_turns`), generate ~25 scenarios for the Contoso Travel Concierge use case. Cover the same category mix as `sample-prompts-v1.jsonl` — grounded flight/hotel/car, multi-part composition, clarification, out-of-scope, adversarial injection, edge no-match, boundary. Cap `desired_num_turns` at 5. Save the result as `artifacts/datasets/reference/simulation-prompts-v1.jsonl` and validate that every row parses as JSON and IDs are unique.*
+>
+> This is exactly the workflow that produced [`simulation-prompts-v1.jsonl`](../../artifacts/datasets/reference/simulation-prompts-v1.jsonl) — swap out the use case and category mix and you have a reusable pattern for any agent. Two-line rule of thumb:
+> - **Attach the sample, not just describe it** — schema fidelity beats prose every time.
+> - **Ask for validation in the same turn** — Copilot will run a JSON parse + uniqueness check before handing back the file, saving you an iteration.
+
+#### 8.2.2 Path 2 — single-turn against the reference set
+
+**While Path 1's simulation is still running, kick off Path 2 in parallel.** The Foundry Evaluations UI handles concurrent runs — new evaluations queue independently and don't block each other. This subsection has its own step numbering (1–11) so you can reference *Path 1 step N* or *Path 2 step N* without ambiguity. Same entry point (agent → Evaluation tab), same "+ New evaluation" button; what changes is data source, data shape, and the auto-selected evaluator menu.
+
+1. **Create a new evaluation.** From the Evaluation tab, hit "+ New evaluation" again. The wizard opens fresh.
+
+   ![New evaluation dialog — same entry as Path 1](assets/8-2-p2-01.png)
+
+2. **Choose data source: upload existing dataset.** The alternate branch we skipped in Path 1 (Path 1 step 5) — bring your own set instead of simulating.
+
+   ![Data source picker — upload existing dataset selected](assets/8-2-p2-02.png)
+
+3. **Upload `evaluation-data-v2.jsonl`.** The 25-row curated reference set from §8.0 with `query`, `context`, `ground_truth`, `expected_behavior`, and `tags.{tier,category}` per row.
+
+   ![Upload evaluation-data-v2.jsonl](assets/8-2-p2-03.png)
+
+4. **Dataset preview + field mapping.** Foundry inspects the schema and offers to map the columns to evaluator inputs (query → prompt, ground_truth → reference, etc.). Review + confirm.
+
+   ![Dataset preview + column mapping](assets/8-2-p2-04.png)
+
+5. **Auto-selected evaluators — a wider set than Path 1.**
+
+   ![Auto-selected evaluators — more extensive than Path 1](assets/8-2-p2-05.png)
+
+   Compare this evaluator list to Path 1 step 11. **This set is larger**, and the reason is in the data:
+
+   - **Path 1** rows are simulator-generated conversations with no `ground_truth` field. Only *reference-free* evaluators can score them — safety, coherence, fluency, task adherence.
+   - **Path 2** rows carry `ground_truth` *and* `expected_behavior` per row, which unlocks **reference-based** evaluators — Groundedness, Relevance, Retrieval, Similarity — that need a target answer to compare against.
+
+   > 🧠 **Data shape determines what you can measure.** This is the second incarnation of the mental model we saw in §8.1 ("the score is a projection"). Path 1 measures what emerges from real-shaped traffic; Path 2 measures conformance to a fixed reference. Neither replaces the other — that's why we run both.
+
+6. **Review + submit.** Same confirmation surface as Path 1.
+
+   ![Review + submit evaluation](assets/8-2-p2-06.png)
+
+7. **Run kicks off.** Landing on the evaluation detail page.
+
+   ![Evaluation run detail — Path 2 queued/running](assets/8-2-p2-07.png)
+
+8. **Run completes.** 25 rows × N evaluators. Much faster than Path 1 (no simulation step, no multi-turn iteration).
+
+   ![Evaluation run detail — completed](assets/8-2-p2-08.png)
+
+9. **Summary dashboard.** Aggregate pass rates per evaluator across the 25 rows.
+
+   ![Path 2 summary — aggregate scores across 25 rows](assets/8-2-p2-09.png)
+
+10. **Failure drill-in.** Same pattern as Path 1 — sort/filter, click into a failing row, read the judge's explanation. On this cleaner set the failures are more diagnostic: when Task Adherence flags an `out_of_scope` row, the failure is unambiguous.
+
+    ![Path 2 failure drill-in — evaluator explanation](assets/8-2-p2-10.png)
+
+11. **Wrap: the project-level Evaluations tab.** Navigate from the agent scope up to the **project-level Evaluations tab** (left nav, not the agent's tab). Both runs — Path 1 (simulated) and Path 2 (curated) — appear side by side, sortable, comparable.
+
+    ![Project-level Evaluations tab — both Path 1 and Path 2 runs listed](assets/8-2-p2-11.png)
+
+    > 🧭 **Two Evaluations tabs, one dashboard.**
+    > - **Agent → Evaluation tab** = the *creation* surface. Everything you do here is scoped to *this agent* and *this version*. Start here when you're iterating on one agent.
+    > - **Project → Evaluations tab** = the *inventory* surface. Every evaluation ever run in this project — across every agent and every version — lives here. Start here when you're comparing agents, comparing versions, or looking for a run someone else on the team kicked off.
+    >
+    > Same runs, two lenses. Path 1 and Path 2 both show up in both places; the difference is scope.
+
+#### 8.2.3 Reading the results — the single-turn run
+
+Path 2 completes fast (25 rows, no simulation step); Path 1 is still generating and scoring the 84 conversations. **Simulation eval takes much longer** — often 20–40 min end-to-end depending on backend load — so instead of blocking, we read what Path 2 gave us now and leave Path 1's summary as a learner exercise. The two runs share the same evaluator dashboard shape, so anything you learn here transfers directly to Path 1 when it lands.
+
+1. **Path 2 run completed — Task Adherence is the flagged evaluator.**
+
+   ![Path 2 completed run detail — Task Adherence flagged](assets/8-2-3-01.png)
+
+   This is exactly the pattern §8.1 Turn 4 (adversarial refusal) and Turn 5 (multi-part tradeoff) predicted at population scale: safety scores are fine, most quality evaluators pass, but **Task Adherence** drags because the built-in judge doesn't credit correct refusals or transparent tradeoffs. Now we have it as a *distribution* instead of an anecdote.
+
+2. **Set up cluster analysis.** The portal offers a visual clustering view — *"Discover patterns in your evaluation runs with a visual map clustered by AI model. Click to explore summaries or inspect individual samples."*
+
+   ![Cluster analysis setup card](assets/8-2-3-02.png)
+
+3. **View the cluster analysis — 47 samples grouped into colored clusters.** Foundry embeds each sample and groups semantically similar ones together. The clusters aren't category tags from your dataset — they're patterns the tool *discovered* across the samples.
+
+   ![Cluster analysis view — 47 samples, colored clusters](assets/8-2-3-03.png)
+
+   > 🧠 **Two ways to group failures — user-tagged vs. discovered.** In §8.0 we hand-tagged every row with `tags.category`. That's the *user-tagged* grouping. Cluster analysis produces a *discovered* grouping — it may confirm your categories, split one into two ("out-of-scope for cooking" vs "out-of-scope for weather"), or reveal a cluster nothing in your dataset schema captures. Read both.
+
+4. **Filter to drill into a cluster.** Filters combine cluster ID, evaluator, score threshold, tags — same "narrow to the interesting slice" workflow as the §8.1 Traces tab.
+
+   ![Cluster analysis filters](assets/8-2-3-04.png)
+
+5. **AI suggestions for deep dive — pick "Reduce unwarranted refusals".** The portal proposes actionable improvement themes based on the failure pattern. Selecting one filters the view to samples that match the theme and surfaces an insight — in our case, an explanation that *many Task Adherence failures were triggered by legitimate refusals the judge marked as non-completion*.
+
+   ![AI suggestion selected — Reduce unwarranted refusals](assets/8-2-3-05.png)
+
+   > 💡 **This IS the §8.1 Turn 4/5 lesson.** The tool independently rediscovered the "safety-and-quality-can-disagree" pattern by clustering the failures. That's validation from a second angle: it isn't a labeling quirk, it's a real behavior gap the built-in Task Adherence evaluator has with our use case.
+
+6. **Look at one specific failure — the weather forecast refusal.** From the main results view, drill into a single flagged row: the traveler asked *"What's the weather in Paris this weekend?"* (row 24 of `evaluation-data-v2.jsonl`, `tags.category = boundary`). The agent politely declined and offered to help plan a trip instead. That's the correct behavior per §7.5's out-of-scope rule. Task Adherence scored it as a miss.
+
+   ![Task Adherence failure — weather forecast refusal](assets/8-2-3-06.png)
+
+7. **Cluster + recommendation — how to improve this metric.** Cluster analysis places this specific sample into a cluster with siblings ("sourdough" cooking, "Python debug", "leadership book" — all correct refusals), and offers a concrete recommendation for the instruction change that would raise Task Adherence on this whole cluster without lowering the refusal bar.
+
+   ![Cluster placement + recommendation](assets/8-2-3-07.png)
+
+   > 🧭 **This is the direct handoff to §8.3 Optimize.** The recommendation you're reading is a candidate instruction change; §8.3 is where we apply it, re-run this same evaluation, and confirm the delta.
+
+> ⚠️ **What Path 1 will add (learner exercise).** When the Path 1 simulation finishes, open its results and repeat steps 1–7 above. You'll see the same Task Adherence pattern, but *at 84 conversations instead of 25 rows* — the clusters are richer, and multi-turn failures (drift, forgetting) show up as their own cluster that Path 2's single-turn set couldn't produce. Compare the recommendation Path 1's cluster analysis proposes against the one from Path 2 — they should agree on the biggest fix, and disagree on the smaller ones. That's a good sign; that's what makes running both worth the cost.
+
+> 💡 **Deferred: custom rubric evaluators.** The "unwarranted refusal" and "transparent tradeoff" behaviors we saw fail Task Adherence twice now are exactly what a **custom rubric evaluator** would credit. We'll build one — but as part of the **hosted-agent + agent-optimizer** chapter later, where it fits the toolchain naturally (Python-backed evaluators, `.foundry/` config, deploy pipeline). For §8.2 we intentionally stopped at "here's the signal the built-ins produce" so §8.3 can operate on that signal with instruction changes alone.
+
+#### What did we learn?
+
+- Foundry evaluation has **two flavors** driven by data shape: simulator-generated multi-turn conversations (production-shape, catches drift) and curated single-turn queries with `ground_truth` (regression-shape, faster, more diagnostic).
+- The **auto-selected evaluator list expands when the data shape supports reference-based scoring** — `ground_truth` unlocks Groundedness / Relevance / Similarity that a bare user prompt can't.
+- The **project-level Evaluations tab** is the cross-agent inventory; the **agent-level Evaluation tab** is the per-agent creation surface. Two lenses on the same runs.
+- Cost profile is dramatically different: Path 1 is a weekly/pre-release signal (~$1–$3 per run); Path 2 is a per-PR signal (cents per run, seconds to complete).
+
+#### 💡 Try one thing — hand it to Copilot
+
+Open Copilot Chat with the **microsoft-foundry** skill active and ask:
+
+> *Using the `eval-datasets` sub-skill, list every evaluation run in this project. For each, tell me: dataset name, row count, average scores per evaluator family, and one failing row I should look at first. Prioritize the highest-signal failure I can address in one instruction change.*
+
+This is the sub-skill equivalent of clicking through the project-level Evaluations tab — same data, an editor-native summary you can compare against your local notes.
+
+#### ⚠️ Tips & Troubleshooting
+
+- **Reference-based evaluators need `ground_truth` (or `expected_behavior`) per row.** If a row's field is empty, that evaluator scores `n/a` for that row and drops out of the aggregate. Populate before uploading.
+- **Path 1 without `ground_truth` will show fewer evaluator cards than Path 2 on the same dataset.** This is not a bug — it's the auto-selection logic doing its job. If you *want* reference-based scoring on simulated data, either annotate the simulated conversations first (§8.1's annotation column) or curate a subset by hand.
+- **Simulator runs cost real money.** Kick them off deliberately. Rerun the same scenario file (same seed) if you need a comparable run — freshly re-generated conversations vary and can mask real regressions.
+- **Two Evaluations tabs, one storage.** Don't be surprised when a run started at the agent scope shows up in the project scope minutes later — same data, different lens.
+
+### 8.3 Optimize — Copilot-driven prompt improvement loop
+
+#### Developer question
+
+> ❓ *I now have a measured failure pattern (Task Adherence flagged, "unwarranted refusals" cluster). How do I turn that into a specific instruction change, apply it, and prove the change worked — without leaving my editor?*
+
+#### What problem are we solving?
+
+§8.2.3's cluster analysis surfaced a concrete improvement direction: *"reduce unwarranted refusals."* That's a hypothesis, not a fix. Optimize is the loop that **turns hypotheses into shipped instruction changes with measured deltas**. This lab does the full loop — read the evaluation, propose an instruction change, apply it, re-evaluate, compare — driven from Copilot Chat using the `microsoft-foundry` skills.
+
+#### How are we solving it?
+
+Two complementary paths, walked in sequence:
+
+- **§8.3.1 Observe-skill loop** — human at the wheel. Copilot Chat drives the `observe` sub-skill through **generate suite → evaluate → cluster failures → propose candidate → approve → re-eval → compare** with a sign-off gate at every write. This is where you *learn* the shape of the loop and diagnose the flaws (config, rubric, cost) that no automation should ever silently paper over.
+- **§8.3.2 Agent Optimizer** — the same loop, automated. One CLI invocation drives all the stages end-to-end, applies the top candidate that clears configured guardrails, and hands you a report. This is what a *routine* optimization cycle looks like once you trust the shape.
+
+We already did the setup that used to be steps 1–4 of the v3 lab:
+
+- **v3 step 1 (open editor)** — you're already here.
+- **v3 step 2 (reset to baseline)** — not applicable; we're not editing code, only prompt-agent instructions.
+- **v3 step 3 (activate Copilot Chat)** — done in §6.2 / §6.3.
+- **v3 step 4 (list skills to confirm)** — done in §6.3 / §6.6.
+
+So we skip straight to the substance: **kick off the Observe skill against the run we just did in §8.2.**
+
+#### 8.3.1 Observe-skill loop — human at the wheel
+
+The Kick-off is a three-substep flow: (1) start a clean Copilot session, (2) have Copilot compose the driver prompt for you, (3) paste it back and watch the loop execute. After that, steps 2–5 pick up with recommendation review, apply, verify, and snapshot.
+
+1. **Start a new Copilot Chat session — configure defaults first.** Open a fresh session (leaves any prior failed runs in a clean transcript we can point at later). **Before you send anything**, set:
+
+   - **Model** — Claude Sonnet 4.6 or GPT-5.5+ (weaker models produce weaker recommendations on this workflow).
+   - **Bypass Approvals — ON.** The `observe` sub-skill makes many small tool calls; each approval dialog stalls the loop.
+   - **microsoft-foundry skill available** (should carry over from §6; if not, re-activate).
+
+   ![New Copilot Chat session — defaults configured](assets/8-3-01.png)
+
+   > ⚠️ **Fresh session = fresh defaults.** Auto-approve and model choice reset per session. Do this **before** sending your driver prompt — otherwise the skill's early tool calls stall on approval dialogs and the run reads as broken.
+
+2. **Ask Copilot to compose the driver prompt for you.** Instead of guessing the exact shape of the `observe` invocation, have Copilot read the skill catalog and produce a prompt tuned to your context. Send this meta-request:
+
+   > *Read the microsoft-foundry skills and give me a prompt I can use to observe and optimize my `contoso-travel-concierge-prompt` — using the deployed endpoint and assuming I have no prior datasets.*
+
+   ![Copilot Chat — meta-request to generate the driver prompt](assets/8-3-02.png)
+
+   Copilot introspects the skill definitions and produces a full driver prompt. In our run it generated:
+
+   ```text
+   Use the microsoft-foundry skill — observe sub-skill.
+
+   ## Context
+   - Agent: contoso-travel-concierge-prompt (prompt agent)
+   - Agent root: /workspaces/agent-optimization-workshop/src
+   - azure.yaml is present at the workspace root
+   - No prior datasets or evaluation suites exist (.foundry/ cache is empty)
+   - Instructions file: src/instructions/concierge.md
+
+   ## Goal
+   Run the full eval-driven optimization loop on the deployed prompt agent:
+
+   1. Resolve the active azd environment and deployed agent identity from `azd env get-values`.
+   2. Verify the agent is running with `agent_get` and `agent_container_status_get`.
+   3. Since no datasets or evaluators exist, generate a brand-new evaluation suite with
+      `evaluation_suite_generation_job_create` — use the agent's instructions, the three
+      tool calls (flight_agent, hotel_agent, car_rental_agent), and the five destinations
+      (Paris, London, Tokyo, Rome, Cancún) as grounding context for the generation job.
+   4. Poll with `evaluation_suite_generation_job_get` until complete, then inspect with
+      `evaluation_suite_get`. Persist suiteName, suiteVersion, and artifact paths under
+      .foundry/suites/, .foundry/evaluators/, and .foundry/datasets/.
+   5. Run a batch eval against the deployed agent endpoint with
+      `evaluation_agent_batch_eval_create` using the generated suite.
+      Use the tier=smoke suite first.
+   6. Download and cluster failures. Show me the top failure categories with scores.
+   7. For the worst-performing category, run prompt optimization with `prompt_optimize`
+      against the deployed endpoint. Show me the candidate diff vs src/instructions/concierge.md
+      and wait for my sign-off before writing changes.
+   8. After sign-off, re-evaluate with the same suite, compare versions with
+      `evaluation_comparison_create`, and summarize the score delta.
+   9. Ask whether to enable continuous eval monitoring when done.
+
+   Strictly follow the observe skill's behavioral rules: reuse cache before
+   regenerating, confirm before any file write or deploy, persist all artifacts
+   to .foundry/, and auto-poll jobs in the background.
+   ```
+
+   Five things that make this prompt work — read them before you paste anywhere else:
+
+   - **Names MCP tools explicitly** — `agent_get`, `evaluation_suite_generation_job_create`, `evaluation_agent_batch_eval_create`, `prompt_optimize`, `evaluation_comparison_create`. Naming the tools reduces the chance Copilot substitutes a nearby-but-wrong verb.
+   - **Grounds the generation job in your agent's actual context** — three tool calls, five destinations, real instructions file. That's what makes the generated suite score cleanly instead of triggering the baseline over-ask pattern (§7.7) everywhere.
+   - **Starts at `tier=smoke`** — the fastest signal before spending on regression + coverage. Same three-tier philosophy as our `evaluation-data-v2.jsonl` schema.
+   - **Explicit human-sign-off gate before writing prompt changes.** The `observe` skill will produce a diff; you stay in the loop. This guardrail keeps a run from silently changing the agent under you.
+   - **Ends with a continuous-eval question** — the natural handoff to §8.4 Monitor (recurring evals as a scheduled signal, not a manual one).
+
+   > 🧠 **The meta-technique.** Whenever a sub-skill takes many named parameters and your ad-hoc prompt isn't landing, invert: have Copilot introspect the skill definitions and compose a prompt tuned to your context. This is a reusable pattern well beyond this workshop.
+
+3. **Paste the generated prompt back and watch Copilot execute.** Copilot creates a task list from the numbered goals, then starts working through them — resolving `azd env`, verifying the agent, generating the suite, polling the job, running the batch eval, clustering failures.
+
+   ![Copilot Chat — task list created, tool calls streaming, .foundry/ appearing under src/](assets/8-3-03.png)
+
+   Two things to notice as it runs:
+
+   - **`.foundry/` is created under `src/`, not the workspace root.** The `observe` skill treats the agent root (`src/`) as the artifact home. Suites live at `src/.foundry/suites/`, generated evaluators at `src/.foundry/evaluators/`, cached datasets at `src/.foundry/datasets/`. This is the local trace of every generated artifact — versionable, reusable across future runs (cache-first), and gitignored by default.
+   - **Task list updates live.** As each numbered goal completes, its checkbox flips. If a step stalls, the transcript above it shows the last tool call — usually enough to diagnose (missing env var, auth expired, model quota).
+
+   > 🧭 **Two windows, one loop.** Foundry portal open in another tab is the audit surface — the batch eval created by step 5 appears there in real time. Keep both open; the version bump in the recommendation phase will materialize in both places.
+
+   > ⚠️ **Gotcha — Copilot polling stalls.** Long-running MCP jobs (dataset generation, batch eval) sometimes leave Copilot's poll loop in a limbo state — no new tool call for a minute or more. Notice that **the skill itself tells you to nudge it** ("prompt me to check again when you're ready"). Two-step recovery:
+   >
+   > 1. **Verify progress in the portal.** Open the project's **Data** tab (or Evaluations tab, depending on which job stalled). If the dataset / eval is *Ready* / *Succeeded*, the backend is done — Copilot just hasn't polled since.
+   >
+   >    ![Portal Data tab — dataset generation completed](assets/8-3-stall-portal-check.png)
+   >
+   > 2. **Nudge Copilot** with a short prompt: *"The dataset generation shows as Ready in the Data tab. Please continue with the next step."* It picks the task list back up and moves on.
+   >
+   >    ![Copilot Chat — nudge sent, task list continues](assets/8-3-stall-nudge-copilot.png)
+   >
+   > Do **not** re-send the whole driver prompt when this happens — that restarts the loop and creates a duplicate suite. Nudging preserves the transcript and the artifacts already produced.
+
+   Once the nudge lands, Copilot resumes and the batch evaluation kicks off against the deployed endpoint. The portal Evaluations tab shows it running in real time:
+
+   ![Portal Evaluations tab — batch eval running against generated suite](assets/8-3-eval-in-progress.png)
+
+   *Above: audit-side confirmation the driver prompt landed as intended — a real eval created against the deployed agent, not a local mock. Row counts, evaluator selection, and target agent version are all visible before results even start streaming.*
+
+   ![Portal — the observe skill generated a single custom rubric evaluator with multiple dimensions](assets/8-3-custom-rubric-evaluator.png)
+
+   *Above: click into the evaluator name on the eval detail page and notice something the skill did quietly — instead of enabling ten separate built-in evaluators (Task Adherence, Groundedness, Relevance, …), it generated **one custom rubric evaluator** with multiple weighted dimensions (task_and_scope_classification, required_slot_collection, retrieval_target_and_query_alignment, grounded_reporting_accuracy, …). Each dimension is a mini-evaluator scored against agent-specific criteria the skill inferred from your instructions file.*
+
+   > 🧠 **The rubric evaluator we deferred to the hosted-agent chapter just showed up here — automatically.** In §8.2.3 we said "custom rubric evaluators are the escape hatch for the correct-refusal-flagged-as-non-adherence pattern, and we'll build one in the hosted-agent chapter." The `observe` skill's default behavior is to *generate one for you* — grounded in the agent's instructions, tools, and use cases — instead of relying on built-ins. That's why the results here are more actionable than the "Partial → clarification" mess we saw with the built-in-only run earlier: the rubric knows what "success" means for *your* agent, not generic success. Deferred lesson, still coming (the hosted chapter teaches you to *hand-author* one when the auto-generated shape isn't right); this run shows you why it matters.
+
+   > 💡 **Read the dimensions before you look at the scores.** Open the rubric definition and read the five dimensions Copilot chose. Do they match how *you* would grade a good travel-concierge response? If a dimension is missing (say, "presents tradeoffs when budget conflicts") or overweighted (say, `required_slot_collection` at weight 8 when your baseline weakness is over-asking), you have a hint for what to override in a hand-authored rubric later. This inspection is free signal — do it every time the skill generates a rubric for you.
+
+   > 🧭 **Same stall pattern again — nudge Copilot when the eval completes.** The `observe` skill polls at multiple hand-off points (suite generation, batch eval, cluster analysis). When the eval finishes and Copilot's next tool call doesn't fire within a minute, use the same recovery pattern from the earlier `⚠️ Gotcha` callout: verify in the portal, then send Copilot a short *"the eval completed — please check results and continue"* prompt. Don't re-send the driver prompt.
+
+4. **Review the eval results — five views to inspect before asking for a recommendation.** Once Copilot nudges past the eval-complete hand-off, walk the results in the portal to build a mental model of *what actually failed and why*. Copilot's recommendation in the next step will be much more useful if you've read these five views first.
+
+   1. **Rubric definition — five weighted dimensions.** Click the evaluator name on the eval detail page. This is the same rubric we noticed being auto-generated in Step 3, now in full detail: five dimensions each with a description, weight, and always-applicable flag.
+
+      ![Rubric evaluator — five dimensions with descriptions and weights](assets/8-3-rubric-details.png)
+
+   2. **Eval status: Completed.** Confirm the whole run finished cleanly against every row of the smoke suite. If any rows show `error` or `partial`, sort by status and open one — usually a transient MCP or auth blip, occasionally a real agent-side crash worth investigating before you trust the aggregate.
+
+      ![Evaluation completed against the generated smoke suite](assets/8-3-eval-completed.png)
+
+   3. **Per-record score — one number per row.** Because we have one rubric evaluator (not ten built-ins), each row has **one aggregate score** — a weighted combination of the dimension sub-scores. Failing rows are clean to spot: sort ascending by score and the top of the list is your triage set.
+
+      ![Per-record view — one aggregate rubric score per row](assets/8-3-record-single-score.png)
+
+      > 🧠 **This is the payoff of the auto-generated rubric.** In §8.2.2 we sorted by ten different evaluator columns and had to decide which mattered. Here, one score already reflects your priorities via the dimension weights — a rubric-weighted 2/5 tells you *why* it's low (which dimensions dragged) without needing to correlate across columns.
+
+   4. **Record detail — full turn, tools called, response.** Click any low-scoring row to see the full turn: user query, tool calls, agent response, evaluator scores at both the aggregate and dimension level. This is the equivalent of §8.1's per-turn drill, now on the *evaluated* rows instead of ad-hoc playground turns.
+
+      ![Record detail view — user query, response, evaluator breakdown](assets/8-3-record-detail-view.png)
+
+   5. **Failure drill — which dimensions dropped.** Expand the evaluator card inside a failing record to see the per-dimension scores + judge explanations. This is where the *actionable* signal lives.
+
+      ![Failure record — per-dimension breakdown with judge reasoning](assets/8-3-failure-rubric-drill.png)
+
+      Reading the dimensions across a handful of failing rows produces a summary you can act on. In our run, aggregating five failing rows gave:
+
+      | Dimension | Weight | Avg score | Severity |
+      |---|---:|---:|---|
+      | `required_slot_collection` | 8 | 1.6/5 | 🔴 dominant driver — baseline over-asks; drops on nearly every row |
+      | `retrieval_target_and_query_alignment` | 6 | 2.0/5 | 🔴 queries are misaligned with the correct dataset |
+      | `grounded_reporting_accuracy` | 6 | 2.2/5 | 🟠 mixes retrieved facts with unsupported claims |
+      | `actionable_response_presentation` | 4 | 2.0/5 | 🟠 responses lack ranked options or tradeoff structure |
+      | `general_quality` | 4 | 2.6/5 | 🟠 tone + fluency ok, structure weak |
+      | `task_and_scope_classification` | 5 | 4.0/5 | 🟢 baseline correctly classifies most requests |
+      | `no_result_and_unsupported_handling` | 4 | 4.0/5 | 🟢 handles no-match cases reasonably |
+
+      **The takeaway:** two dimensions (`required_slot_collection` × 8 + `retrieval_target_and_query_alignment` × 6 = 14 of ~35 weighted points) dominate the failure signal. Fixing the over-ask pattern in instructions should move both — that's the specific hypothesis Copilot's recommendation will test in Step 5.
+
+      > 💡 **Do this dimension aggregation for every rubric-based eval.** Skimming five failing rows and jotting per-dimension averages takes 2–3 minutes and produces a *ranked hypothesis list* Copilot can then confirm or refute. The alternative — accepting Copilot's top recommendation without this pass — works, but you lose the ability to sanity-check *why* the recommendation targets what it does.
+
+5. **Ask Copilot for the top recommendation with dimension context.** Now that you have a dimension-ranked failure hypothesis, ask:
+
+   > *What's the top recommendation, and what exact instruction text does it propose adding or replacing? Show me the before / after diff of the concierge instructions.*
+
+   Copilot returns a candidate instruction change with a diff and — because we scoped the driver prompt in Step 2 with a sign-off gate — pauses for your approval before writing anything.
+
+   ![Copilot Chat — candidate instructions diff with approval prompt](assets/8-3-recommendation-approval.png)
+
+   *Above: the sign-off gate the driver prompt asked for. The diff is small, targeted, and explains what dimension it's addressing. Read the diff, confirm it doesn't kill a behavior you care about, then approve.*
+
+   > 🧠 **The recommendation is a hypothesis, not an oracle.** A perfectly reasonable recommendation can regress a metric you weren't watching. The next steps *measure* whether it lands rather than trusting it on aesthetics.
+
+6. **Approve → new agent version lands in the portal.** After approval, Copilot writes the new instructions via the Foundry MCP and the agent version bumps in the portal. This is the round-trip you set up in Step 1: Chat drives, portal records.
+
+   ![Foundry portal — new agent version created with optimized instructions](assets/8-3-new-version-portal.png)
+
+   *Above: the audit trail materialized. You can point at exactly which version corresponds to the pre- and post-optimization runs.*
+
+7. **Nudge Copilot with "compare versions" — read improvements *and* regressions honestly.** Copilot's next step is to re-evaluate the new version against the same suite. When the re-eval completes and Copilot pauses again (same polling stall pattern from Step 3), nudge with a specific ask:
+
+   > *The re-eval completed. Please compare versions and summarize per-dimension deltas — flag any regressions alongside the improvements.*
+
+   ![Compare versions — dimension-level deltas showing improvements and regressions](assets/8-3-compare-versions-results.png)
+
+   *Above: a typical first-iteration result. Some dimensions moved up cleanly, others regressed. Copilot presents choices — accept the improvement, roll back, or run another optimization iteration to address the regressions.*
+
+   > 🧠 **This is the moment the workshop earns its title.** *Agent optimization is iterative* — first-pass instruction changes almost always improve the primary target while nicking a secondary dimension. That's not failure; that's the normal shape of the loop. What matters is whether the next iteration can close both.
+
+   Pick **"optimize iteration 2"** (or the equivalent option) to let Copilot propose a second candidate that keeps the iteration-1 gains and targets the regressed dimension.
+
+   > ⚠️ **Gotcha — iteration 2 may spawn a new Copilot Chat session.** In our run, choosing the next iteration opened a fresh Chat session. **This means the Step 1 defaults reset:** re-enable **Bypass Approvals**, confirm the strong model is still selected, and only *then* let iteration 2 run. Miss this and iteration 2 stalls on the first approval dialog exactly like Step 3's early tool calls did.
+
+   > 💡 **Reuse the same driver prompt when you can.** If iteration 2 lands in a fresh session, the fastest recovery is to paste your generated driver prompt from Step 2 back in (Copilot will pick up existing artifacts from `src/.foundry/` via cache-first behavior instead of re-generating). If you regenerate, you lose the delta-comparison anchor.
+
+   Once iteration 2 finishes, the compare view shows the second candidate side by side with the first. Copilot presents the same accept / iterate again choice — often the second iteration recovers the regression from iteration 1 and lifts the overall score at the same time.
+
+   ![Iteration 2 completed — improvements retained + regression closed](assets/8-3-iteration-2-complete.png)
+
+   *Above: the second iteration outcome. Read the dimension deltas relative to *both* baseline and iteration 1 — you want green vs. baseline (net gain) and non-red vs. iteration 1 (no backsliding on what iteration 1 already fixed).*
+
+   **After a few iterations — the audit trail materializes.** Return to the agent's **Evaluation tab**. Every iteration you ran shows up as its own row, sortable, comparable.
+
+   ![Evaluation tab — all iteration runs listed with target tokens and overall score per row](assets/8-3-all-iterations-list.png)
+
+   *Above: what "prompt agent optimization" looks like at the end of a real session. Read across the row: **agent version** (which iteration produced this run), **target tokens** (input + output cost per run — creeps up as instructions get more detailed), and **overall score** (the weighted rubric aggregate). The trajectory across rows *is* the optimization story: a rising overall score paired with a rising token count, until the reader decides one dimension of trade-off has crossed a personal line and stops.*
+
+   ![The climb visualized — score trending up across iterations](assets/8-3-climb-visualized.png)
+
+   *Above: the same data, charted. Same-metric-different-lens — the table (previous shot) is the audit form; the chart is the story form. Both are worth a screenshot when you write up a change for a review: the table proves you ran it; the chart shows how it converged.*
+
+   ![Evaluations dashboard — the full arc from baseline to final iteration](assets/8-3-dashboard-story.png)
+
+   *Above: the highest-level narrative. This is the artifact you share with a PM or a director who wants "how did the agent get better and what did it cost." One dashboard, five iterations, a defensible story.*
+
+   > 🧠 **Read the sequence, not just the top row.** The row with the highest overall score isn't automatically the one to promote — a v4 that scored 0.78 with 3.2k tokens can be a better production choice than a v5 that scored 0.81 with 5.8k tokens (~80% more spend per turn). Look at *both* columns before you snapshot.
+
+   > 💡 **The list is the artifact.** Bookmark this view; it's the closest thing you'll get in Foundry to a "prompt version history" surface. Every entry has a clickable target agent version, a run detail, and the exact configuration used — reproducing any past decision is a click, not a re-derivation.
+
+   > 🧭 **Three views of one story — pick your audience.**
+   > - **Compare view** (previous shot) — for the engineer confirming a specific fix landed.
+   > - **List / table** (all iterations) — for the reviewer auditing the sequence.
+   > - **Dashboard chart** — for the stakeholder who wants the shape without the details.
+   > Same run history, three lenses. Reuse the framing across the workshop: same data, multiple lenses (§8.1's Trajectory/Conversation/User/Graph views taught this in a different key).
+
+8. **Snapshot the version you're actually going to promote.** In our walkthrough, iteration 5 landed the best balance of overall score and target-token creep, so we snapshot **v5** (not v2) to the local generated folder:
+
+   ```bash
+   cp src/.foundry/instructions-v5-optimized.md \
+      artifacts/prompts/generated/prompt-agent-optimized-v5.md
+   ```
+
+   The `generated/` subfolder is gitignored — that's on purpose; only reviewed prompts get promoted to `reference/`. This is the artifact §8.4 Monitor and §8.5 Handoff will reference as "the current baseline."
+
+   > ⚠️ **Do this even if the delta was small.** The value of the snapshot isn't the win magnitude; it's the *pairing* — "here's the exact instruction text that moved overall score from X to Y across five iterations, with N target tokens per turn." Six months from now that pairing is what makes the next optimization cycle 10× faster.
+
+   > 💡 **Also snapshot the iteration you *rejected*.** If iteration 6 tried something and regressed, drop it under `generated/` too (e.g., `prompt-agent-rejected-v6.md`). A record of what didn't work is often more valuable than the record of what did — the next round will save time by not re-trying that direction.
+
+   **📊 Ask Copilot for the end-to-end run summary before you close the session.** We ended §8.3 by asking Copilot *"give me the final summary from start to finish"* and got back this table, which we saved verbatim to [`artifacts/prompts/generated/optimization-run-summary.md`](../../artifacts/prompts/generated/optimization-run-summary.md):
+
+   | Version | file_search | Pass | Avg | Δ avg vs v3 |
+   |---|:---:|---:|---:|---:|
+   | **v3 baseline** | ✓ | **10/15** | **0.616** | — |
+   | v4 iter 1 re-eval | ✗ | 11/15 | 0.676 | *n/c — tool-less* |
+   | v5 iter 2 re-eval | ✗ | 12/15 | 0.670 | *n/c — tool-less* |
+   | **v6 fair re-eval** | ✓ | **13/15** | **0.725** | **+0.109** |
+
+   **Net improvement: 3 more tests passing, +11 pp average score.** The `n/c` rows are the ones we caught in the token-count troubleshoot beat — v4 and v5 ran without the vector index attached, so their scores are *not* apples-to-apples with v3. Only v6 (same instructions as v5, tools re-attached) is a fair comparison, and it's the row you promote.
+
+   > 🧠 **Copilot's own summary is a first-class artifact.** In one turn it captured: baseline scores, per-iteration diagnoses + fixes, the root-cause discovery, the fair-eval delta, and the statistical caveat (*"p = 0.164 at 15 samples — a larger dataset would confirm significance"*). That last line is the honest one — the improvement is real and directional, but 15 rows is a small suite. §8.4 Monitor is where you widen the sample by *running the same rubric on production traffic over time*.
+
+   > 💡 **Ask for the visualization too.** After the table, we asked *"visualize this"* — Copilot rendered these two Mermaid charts, which drop straight into the workshop doc without a screenshot round-trip:
+
+   ```mermaid
+   xychart-beta
+       title "Contoso Travel Concierge — optimization climb (avg score)"
+       x-axis ["v3 baseline", "v4 iter 1 ⚠", "v5 iter 2 ⚠", "v6 fair re-eval"]
+       y-axis "avg score" 0.5 --> 0.80
+       bar  [0.616, 0.676, 0.670, 0.725]
+       line [0.616, 0.676, 0.670, 0.725]
+   ```
+
+   ```mermaid
+   xychart-beta
+       title "Pass rate (out of 15)"
+       x-axis ["v3 baseline", "v4 iter 1 ⚠", "v5 iter 2 ⚠", "v6 fair re-eval"]
+       y-axis "tests passing" 0 --> 15
+       bar [10, 11, 12, 13]
+   ```
+
+   > ⚠ v4 and v5 re-evals had `file_search` stripped by the batch eval runner — **not** comparable to v3/v6. The apples-to-apples line is **v3 → v6**: 10 → 13 passes, avg 0.616 → 0.725 (**+0.109**, p = 0.164 at n = 15).
+
+   > 🧭 **Mermaid > screenshots for optimization write-ups.** Screenshots capture the portal moment; Mermaid captures the *derived analysis* in a form the doc renders natively, that a reviewer can copy into their own report, and that you can regenerate from a fresh eval by re-running the same "visualize this" ask. Prefer Mermaid whenever the shape you want is a *chart of numbers* rather than a *screenshot of a UI*.
+
+#### 8.3.2 Agent Optimizer — the same loop, automated
+
+Steps 1–8 above walked *skills-driven optimization with a human at the wheel*. Every stage — kick off, review recommendation, approve, compare, snapshot — is a place where you decide what happens next. That's the right shape for **learning** the loop and for **high-stakes** changes where every candidate deserves a look.
+
+For **routine** optimization — regular cycles of "the eval set grew, re-run and see if we should promote a new candidate" — you don't want to sit through every gate. That's what the **Agent Optimizer** (Python-hosted, `azd ai agent optimize`) automates: it drives the same `observe → prompt_optimize → evaluate → compare` loop end-to-end, applies the top candidate that clears configured guardrails, and hands you a report.
+
+> 🧭 **Full walkthrough of Agent Optimizer lives in the hosted-agent chapter (deferred).** Agent Optimizer needs the agent to be Python-hosted (not just a prompt-agent) so it can rewrite instructions in code, produce candidate configs under `.agent_configs/`, and redeploy via `azd`. That toolchain is the setup for the hosted chapter. What we show here is the *invocation* — how the same loop you just ran manually looks when you fire it from one CLI call.
+
+> 💡 **Skills-driven vs. Optimizer-driven — pick per situation, not per team.** Both approaches use the same `observe`/`prompt_optimize` primitives; the difference is who advances the loop. Use skills-driven when you're learning, when the change is risky, or when the eval set changed shape (new dimensions, new categories). Use Optimizer-driven for scheduled cycles, CI hooks, and post-monitoring auto-remediation (§8.4).
+
+> 🚧 **Screenshots + walkthrough coming.** This subsection captures the Agent Optimizer invocation on the same Contoso Travel Concierge project we just walked manually — so the reader can compare the two paths side by side. The comparison target is: does the automated run land on a candidate close to our v5/v6, and how much of the diagnostic value (token-count anomaly, missing index) survives the automation?
+
+§8.3.1's iteration v6 continues in the background as we invoke the automated path; both endpoints feed §8.4 Monitor next.
+
+**Agent Optimizer optimizes more than the prompt.** §8.3.1 held the model constant (`gpt-5.4-mini`) and only tuned instructions. Agent Optimizer expands the search space: it can compare *multiple models* against your rubric using the *same* eval set, so you get **prompt × model** candidates instead of just prompt candidates. That extra axis is where "should I pay for a smarter model or spend engineering effort on a better prompt?" gets a measurable answer.
+
+##### Setup — deploy the alternative models (once)
+
+Before the Optimize run can compare across models, both alternates need to exist as deployments in the project. We covered model deployment in §7.3 with `gpt-5.4-mini`; repeat for two more.
+
+1. **Open the model catalog.** In the Foundry portal, go to **Build → Models → Model catalog**.
+
+   ![Model catalog landing — Build → Models](assets/8-3-2-01.png)
+
+2. **Deploy a newer / stronger model — `gpt-5.6-sol`.** This is the "would a better model make the prompt work harder?" candidate. Deployment name: `gpt-5.6-sol` (match the value the Optimize tab will list). Global Standard, TPM matching your quota.
+
+   ![Deploy gpt-5.6-sol — upside model](assets/8-3-2-02.png)
+
+3. **Deploy a cheaper same-family model — `gpt-5.4-nano`.** This is the "can we spend less per turn without dropping the score?" candidate. Deployment name: `gpt-5.4-nano`.
+
+   ![Deploy gpt-5.4-nano — downside model](assets/8-3-2-03.png)
+
+   > 💡 **Two axes, one experiment.** `gpt-5.6-sol` tests *quality upside*; `gpt-5.4-nano` tests *cost downside*. Together with the incumbent `gpt-5.4-mini`, the Optimize run gives you a 3-point Pareto curve on cost vs. score in a single job.
+
+##### Invocation — kick off the Optimize job
+
+4. **Return to the agent and click the Optimize tab.** Agent nav: Playground · Details · Traces · Monitor · Evaluation · **Optimize**. Same top nav as §8.1/§8.2 — this is the surface that ties everything together.
+
+   ![Agent → Optimize tab — landing view](assets/8-3-2-04.png)
+
+5. **Select the agent version to optimize from.** Pick the **latest** (v6 after §8.3.1's fair re-eval fix). Optimizer treats this as the baseline — every candidate is compared against it.
+
+   ![Select agent version — latest as baseline](assets/8-3-2-05.png)
+
+6. **Add all three models to the candidate pool.** Check `gpt-5.4-mini` (incumbent, baseline), `gpt-5.6-sol` (upside), and `gpt-5.4-nano` (downside). The Optimizer will build prompt candidates for each and score them.
+
+   ![Add three models to the candidate pool](assets/8-3-2-06.png)
+
+7. **Set max candidates to 3.** This caps the total number of (prompt × model) candidates the Optimizer produces. Three is the workshop default — enough to give a defensible Pareto, few enough to keep cost visible. In production you'd tune this by budget.
+
+   ![Max candidates set to 3](assets/8-3-2-07.png)
+
+   > 💡 **Max candidates is a cost lever.** Every candidate is a full re-eval — cost is roughly `candidates × eval rows × evaluator token cost`. Start low (2–3), read the report, then increase for the next round if the pattern didn't converge.
+
+8. **Use the same eval set as the prior run.** Pick the smoke suite the observe skill generated in §8.3.1 (auto-cached under `src/.foundry/datasets/`). Re-using the *same* dataset is what makes the Optimizer's Pareto **directly comparable** to your manual v3→v6 line.
+
+   ![Reuse the §8.3.1 smoke suite as the eval set](assets/8-3-2-08.png)
+
+9. **Use the rubric evaluator from the prior run.** Pick the auto-generated rubric with `task_and_scope_classification` / `required_slot_collection` / … dimensions. Same rubric → same score axis → interpretable comparison.
+
+   ![Reuse the §8.3.1 rubric evaluator](assets/8-3-2-09.png)
+
+   > 🧠 **Same eval + same rubric = the comparison earns its keep.** If you swap either, the Optimizer's scores stop being commensurable with §8.3.1's numbers. That kills the whole point of comparing paths.
+
+10. **Review the cost estimate — then submit.** Foundry surfaces a pre-flight cost estimate based on candidates × eval rows × evaluator tokens (roughly what your token bill will be at the end of the run). Read it out loud; that's the price of "one automated optimization cycle" for this agent shape. Submit.
+
+    ![Cost estimate + submit — pre-flight bill for the automated run](assets/8-3-2-10.png)
+
+    > ⚠️ **Cost estimates are upper bounds, not caps.** If a candidate's rubric requires many tool calls per row, the actual bill can exceed the estimate. Watch the run tab; abort if you see it running unexpectedly long.
+
+11. **Wait for completion.** Agent Optimizer runs async — refresh the Optimize tab or open the job detail to watch progress. When it lands, the report ranks the (prompt × model) candidates by rubric score and adds cost + latency per candidate so you can pick on the axis you actually care about (score / cost / p95 latency).
+
+    ![Optimize job submitted — running async, waiting for report](assets/8-3-2-11.png)
+
+    Mid-run, the job detail exposes exactly what §8.3.1 walked manually — candidate generation on the left, per-candidate batch evals streaming on the right. The Optimizer is running your §8.3.1 loop, once per (prompt × model) cell, in parallel.
+
+    ![Optimizer mid-run — assessing multiple candidates, batch evals streaming](assets/8-3-2-progress-interim.png)
+
+    A little later the progress bar advances — two candidates completed, third one still running. Each completed candidate has its rubric score visible before the last one lands; that's a useful early signal if you want to peek at how a specific model is behaving before the full report renders.
+
+    ![Optimizer — 2 of 3 candidates complete, third running](assets/8-3-2-progress-2of3.png)
+
+    > 🧠 **§8.3.1 and §8.3.2 are the *same loop*, different drivers.** Manual (§8.3.1) = one candidate at a time, human decides which to spawn next. Automated (§8.3.2) = multiple candidates in parallel, guardrails decide which to keep. The tool calls in the transcript above should look familiar — same `evaluation_agent_batch_eval_create` and `prompt_optimize` verbs the observe skill invoked one-by-one for you.
+
+    > 🧭 **Come back later — this is the last active beat of Core Labs.** The Optimizer job feeds §8.4 Monitor two ways: as a candidate to promote (if it beat v6) *and* as a Pareto curve reference (for the "which model at what price" question that Monitor will keep asking on production traffic).
+
+12. **Run completes — the (prompt × model) comparison lands.** The report shows all three candidates side by side with rubric score, cost, latency per candidate. This is the Pareto view: pick the axis you care about, read the row.
+
+    ![Optimizer report — 3 candidates compared on score / cost / latency](assets/8-3-2-complete-3-candidates.png)
+
+13. **The Optimizer picks a winner — one-click promote.** Foundry highlights the recommended candidate (highest score within cost bounds) and offers a **Promote** action that redeploys the agent with the new prompt *and* the winning model in one step.
+
+    ![Best candidate identified — one-click Promote action](assets/8-3-2-best-promote-action.png)
+
+    > 🧠 **The Pareto surprise.** In our run the winner was **`gpt-5.4-nano`** (cheaper, same family) paired with a further-refined prompt — beating both the incumbent (`gpt-5.4-mini`, our §8.3.1 baseline) *and* the upside candidate (`gpt-5.6-sol`). Read that again: **switching to a cheaper model with a better prompt beat the naive "spend on a smarter model" move.** That's the payoff of putting model choice inside the same experiment as prompt choice — you get to see cost-quality tradeoffs you'd have missed by tuning one axis at a time.
+
+14. **Promotion confirmed.** Foundry confirms the redeploy — new agent version created, target model switched, custom evaluator retained.
+
+    ![Promotion confirmed — new version created](assets/8-3-2-promotion-confirmed.png)
+
+15. **Back to the agent list — v7 is live with the new model.** The agent card now shows **v7** as the active version with `gpt-5.4-nano` as the target model. Three things at once: **optimized prompt + cheaper model + custom evaluator retained** — all applied by one automated run.
+
+    ![Agent list — v7 deployed with gpt-5.4-nano](assets/8-3-2-v7-deployed-with-nano.png)
+
+    > 🧭 **The manual and automated paths converge on the same production endpoint.** §8.3.1 landed us at v6 (manual, incumbent model, optimized prompt); §8.3.2 landed us at v7 (automated, cheaper model, further-optimized prompt). Both feed §8.4 Monitor, which watches whichever version is live and reports on its production behavior. Neither path is "the right one" — they earn different situations, and the reader now knows both.
+
+    > 📊 **Automated run summary — for the record.** Save the Optimizer's report alongside `optimization-run-summary.md` (from §8.3.1) so the two paths sit side by side in `artifacts/prompts/generated/`. Same principle we've been repeating: pair every promoted version with the *reasoning* that justified it. Six months from now the pairing is what makes the next optimization cycle 10× faster — whether the driver was a human or a scheduler.
+
+#### What did we learn?
+
+- The Observe sub-skill turns *"we know it's weak"* (§8.2.3 cluster analysis) into *"we shipped a fix"* (agent version bump + measured delta) — in one Chat flow.
+- **Recommendations are hypotheses.** The workflow's job is not to produce the right fix on the first try; it's to make the iteration cycle short enough that trying five candidates is cheap.
+- Version bumps on the prompt agent (`:3` → `:4`) give us the same audit trail as code commits — you can point at "which version fixed the boundary cluster" without leaving the portal.
+- The `generated/` prompts folder is your **local trace of prompt history** — pair every promoted prompt with the eval delta that justified it.
+
+#### 💡 Try one thing — chain observe + prompt-optimize + eval-datasets
+
+Once the loop above finishes, try the sub-skill chain in a single ask:
+
+> *Chain three sub-skills for me: use `observe` to pull the last two evaluation runs on `contoso-travel-concierge-prompt` (versions :3 and :4), use `prompt-optimize` to propose two more candidate instruction changes that could push Task Adherence even higher on the boundary + out_of_scope clusters, and use `eval-datasets` to identify five representative rows from `evaluation-data-v2.jsonl` that would best regression-test each candidate. Do not apply the candidates yet — just print the three artifacts (report, candidates, rows) so I can review before running.*
+
+This is the pattern §8.5 hands off to the Capstone: one Chat turn, multiple sub-skills, no portal round-trips. The Capstone's hosted agent + agent-optimizer chapter is where this same pattern becomes fully automated.
+
+#### ⚠️ Tips & Troubleshooting
+
+- **Watch for anomalous token counts — they often mean the eval is measuring the wrong agent.** In our own run, we noticed input token counts *dropped* between the baseline and later iterations instead of rising. That signal is suspicious: instruction tuning almost always adds prose, so per-turn tokens should trend up, not down. We asked Copilot why, and the answer exposed a real flaw — **`TargetEvaluations` was not passing the grounding data (the three JSON datasets) through to the agent during eval runs.** Every iteration was being scored on an agent that couldn't retrieve. That inflated the perceived improvement (the judge kept rewarding tighter refusals) and made costs look artificially cheap. The fix is to correct the eval config so the target's tool context matches production, then re-run:
+
+  > *The eval token counts are lower than the playground baseline, which suggests the target agent isn't receiving the grounding data during eval runs. Please inspect the eval configuration for `contoso-travel-concierge-prompt`, confirm whether `file_search` context is being attached to each eval turn, and if not, propose the config fix and re-run iteration 5 as a control.*
+
+  This is the deeper form of the § 8.1 mental model: *the score is a projection of what the agent did — and what the agent did depends on what you fed it.* If cost/tokens move in the wrong direction, don't celebrate the score; investigate the pipeline.
+
+  In our own run, once we told Copilot that iterations 1–5 hadn't been attaching the `contoso-travel-index` (the file_search vector store from § 7.6), it acknowledged the miss and created **iteration v6** with the index correctly attached before re-running:
+
+  ![Copilot Chat — acknowledges missing grounding and prepares v6 with vector index attached](assets/8-3-fair-eval-config-notice.png)
+
+  ![Fair eval — v6 running against the same suite with the vector index attached, tokens now at production-shape levels](assets/8-3-fair-eval-v6-running.png)
+
+  *Above: what a "fair eval" looks like after a config fix. Same rubric, same suite, but the target agent now runs with the same tools it uses in production. Token counts jump back up (that's the *right* direction), and the resulting scores are the ones you can actually trust for a promotion decision.*
+
+  > 🧠 **Skills-based optimization keeps the human in the loop.** The optimize loop is not *"paste the driver prompt and walk away."* Every stage is a place where a human can catch a flaw the skill can't — a config that quietly diverges from production, a rubric dimension that overweights the wrong behavior, a candidate instruction that fixes one metric while regressing another. Copilot did the tedious work (drafting prompts, running evals, clustering failures, proposing changes); we did the *steering* (noticing the token anomaly, calling out the missing index, choosing which iteration to promote). Neither role is optional — that split is the whole design.
+
+- **Copilot runs are non-deterministic — same driver prompt, different transcript, different recommendation.** Two runs of the exact same driver prompt from Step 2 will produce different generated suites, different rubric dimensions, and different top recommendations. That's expected, not a bug. **If a run stops mid-loop without giving you actionable next steps, don't restart — ask Copilot for the recommendation itself:**
+
+  > *You stopped without offering next steps. Given the artifacts so far in `src/.foundry/`, what's the next recommended action from the `observe` sub-skill? Print the exact prompt I should send you to run it, then wait for my go-ahead.*
+
+  This turns Copilot's own skill-catalog awareness into a *self-recovery pattern* — same technique as Step 2's "have Copilot compose the driver prompt for you," now applied mid-loop. Once it prints the next-step prompt, paste it back and let it run.
+- **Copilot picked the wrong agent.** Be explicit: `contoso-travel-concierge-prompt (prompt agent)`. If it forgets between turns, remind it. The `microsoft-foundry` skill scopes to the current project, but Copilot can lose the agent name in long threads.
+- **The delta was zero or negative.** That's data, not failure. Two moves: (1) re-read the recommendation — did Copilot apply what it said it would, verbatim? (2) sample two failing rows on `:4` — is the new instruction firing? If the answer is "yes but the judge still marks it wrong," the fix is a rubric evaluator (deferred to hosted-agent chapter), not another instruction change.
+- **Instructions field doesn't update in the portal.** The MCP write occasionally lands but the portal caches for ~30 s. Refresh the Details tab; the new Instructions text should appear with a bumped version number.
+- **Snapshot the prompt even if you plan to iterate again.** Every candidate you consider promoting deserves an artifact; that's how you compare v2 vs. v3 later without re-deriving the reasoning.
+
+### 8.4 Monitor — production traffic + Ask AI + Observability agent
+
+#### Developer question
+
+> ❓ *The optimized agent (v6) is live. How do I know it's still behaving well as real travelers hit it — and how do I catch the first regression before it becomes an incident?*
+
+#### What problem are we solving?
+
+§8.3 gave us a *point-in-time* delta on 15 rows. Monitor widens that to **distribution over time on production traffic** — so we can see whether the score, cost, and latency profile we measured in the eval hold up when real requests arrive from different regions, at different times of day, under real quota. This is also where the *diagnostic* work you did by hand in §8.3.1 (token anomaly → missing index) becomes a repeatable pattern: the same signals — abnormal latency, error spikes, cost creep — surface here, but at population scale.
+
+#### How are we solving it?
+
+Two concurrent lenses on the same telemetry:
+
+- **§8.4.1 Foundry Monitor tab** — agent-scoped panels tuned to Foundry-native concepts (evaluators, versions, cost per turn). Great for "how is *this* agent doing this week." The `Ask AI` button on every chart is the fastest path from a spike to a hypothesis.
+- **§8.4.2 Azure Monitor + Observability agent** — the same OTel data as §8.1's Metadata column, viewed through Azure's cross-resource observability surface. Great for "why did latency spike from 4pm–5pm across every agent in the RG?" The **Observability agent** takes a chart, correlates events across resources, and hands you a root-cause hypothesis.
+
+Both surfaces read the same App Insights instance we grounded in §8.1 — no new instrumentation. That's the payoff of the OpenTelemetry semantic conventions the platform emits by default.
+
+#### 8.4.1 Foundry Monitor tab — agent-scoped signals + Ask AI
+
+1. **Click the Monitor tab.** Agent nav: Playground · Details · Traces · **Monitor** · Evaluation · Optimize. The top of the page shows aggregate cards (requests, cost, average score) and a set of `Ask AI` prompt chips tailored to what people usually ask about an agent under observation.
+
+   ![Monitor tab landing — top-level aggregate cards + Ask AI prompt chips](assets/8-4-01.png)
+
+   > 💡 **The Ask AI chips are pre-built driver prompts.** Same pattern as §8.3.1 Step 2 (have Copilot compose the prompt for you), applied to monitoring. Read the suggestions to learn the shape of a good monitor question.
+
+2. **Scroll down — charts.** Cost, latency, evaluator scores, error rate all break out into their own charts. Each chart has its own `Ask AI` button — hover a suspicious shape (a spike, a step, a drift) and click.
+
+   ![Monitor charts — cost, latency, evaluator scores; Ask AI available per chart](assets/8-4-02.png)
+
+3. **Scroll back to the top — Set up insights.** The `Set up insights` action activates the **Insights** tab: Foundry runs its own scans against your agent's telemetry and surfaces findings without you writing a query.
+
+   ![Set up insights — activates the Insights tab](assets/8-4-03.png)
+
+4. **Run scan now.** Kick off the first scan manually. Subsequent scans run on a schedule you configure; the first one is a "prime the pump" pass.
+
+   ![Run scan now — first Insights pass](assets/8-4-04.png)
+
+5. **Scan returns — no issues detected.** For a fresh agent on modest traffic this is expected. Real value comes at week 2+ when the scan starts flagging drift, spikes, or cost creep against the baseline it's been building.
+
+   ![Scan complete — no issues detected](assets/8-4-05.png)
+
+   > 🧭 **"No issues" is a real signal.** In §8.1 we treated *absence of a `file_search` span* as evidence for the over-ask pattern. Here, absence of an Insights finding is evidence the agent's steady-state matches its recent baseline. Note it explicitly; don't just skip over the empty state.
+
+#### 8.4.2 Azure Monitor + Observability agent — cross-resource + AI diagnosis
+
+6. **Open in Azure Monitor.** The Foundry Monitor tab has an **Open in Azure Monitor** action (or similar) that punches through to the Application Insights instance backing the agent. This is the same App Insights we referenced in §8.1's OTel forward-ref — now you're looking at it directly.
+
+   ![Open in Azure Monitor — launch Azure portal for cross-resource view](assets/8-4-06.png)
+
+7. **Resource-group-level insights.** Azure's Monitor surface aggregates across every Foundry resource in the RG — not just this one agent. Useful when a problem correlates across agents (e.g., a quota event affects everyone downstream of the same model deployment).
+
+   ![Azure Monitor — RG-level view across all Foundry resources](assets/8-4-07.png)
+
+   > 🧭 **Foundry Monitor is *agent-scoped*; Azure Monitor is *RG-scoped*.** Start in Foundry when you know which agent to look at; jump to Azure Monitor when the shape suggests the cause is upstream (quota, network, model region).
+
+8. **Zoom in on any chart — two options.** Click into any chart and Azure surfaces two follow-through actions: **View traces** (the raw span data) and **Try observability agent** (an AI agent that correlates events across resources for you).
+
+   ![Chart zoom — "View traces" and "Try observability agent" options](assets/8-4-08.png)
+
+9. **View traces — filtered subset to dive into.** The same trace surface you learned in §8.1, now pre-filtered by the chart's context (time range, resource, severity). Click any trace → same Metadata column → same drill workflow.
+
+   ![View traces — pre-filtered trace list from the chart context](assets/8-4-09.png)
+
+   Click a specific row and the trace detail opens — again, the same Metadata + span-tree affordances from §8.1's diagnostic exercise, only reached through the Monitor-first path instead of the Traces-tab-first path. From this view you can also invoke the **Observability agent** on the specific trace to troubleshoot it in place.
+
+   ![Trace detail from Azure Monitor — Metadata + span-tree + inline Observability agent action](assets/8-4-09-trace-detail.png)
+
+   > 🧭 **Two paths, one trace.** In §8.1 you started at the Traces tab and drilled down. Here you started at a chart and drilled down. Same underlying span; different entry point. Learn both — the *entry point that matches your question* saves the most time.
+
+   > 💡 **Observability agent works at every scope.** RG-level (step 10) for cross-resource patterns, chart-level (step 8) for a specific spike, trace-level (right here) for a single failing request. Pick the scope that matches the ask; the agent uses the same underlying correlator either way.
+
+   Once you invoke it on a single trace, the agent produces a targeted diagnosis for *that* request — not a summary of the whole hour or the whole RG, but a specific answer to "why did *this one* fail."
+
+   ![Observability agent — diagnosis for the specific trace](assets/8-4-09-trace-diagnosis.png)
+
+   Ask a follow-up (or let the agent's own suggested drill-in fire) and it runs a **deeper investigation** — traversing related resources, correlating the trace with downstream service health, KQL-ing the relevant tables, and streaming its reasoning as it goes.
+
+   ![Observability agent — deep investigation in progress, tools + reasoning streaming](assets/8-4-09-deep-investigation.png)
+
+   > 🧠 **This is the §8.3.1 loop, but on infra.** Compare the transcript here to §8.3.1's Copilot Chat streaming: same "call a named tool, read the result, decide the next call" pattern, just against Azure Monitor / App Insights / resource health instead of Foundry evaluators. If you learned to read the observe skill's transcript, you already know how to read this one.
+
+   When the deep investigation completes, the agent hands you a **final analysis report** — root cause, evidence, and (usually) a suggested remediation path.
+
+   ![Observability agent — final analysis report with root cause + evidence](assets/8-4-09-final-report.png)
+
+   *Above: the closing artifact. This is what you'd paste (or link) into a Slack thread, a PR description, or a §8.5 handoff note — the report bundles the *findings* with the *citations* so the next reader doesn't have to re-run the investigation.*
+
+   > 💡 **Save the final report next to the run it explains.** Same discipline as §8.3.1's "snapshot the prompt *and* the eval delta that justified it": pair the observability report with the run/trace it explains under `artifacts/evaluators/generated/` (or an equivalent local folder). Six months from now, "we hit rate limits on 2026-08-24 and here's what the agent found" is a searchable fact instead of oral tradition.
+
+   > 🧭 **Scope of ask determines shape of answer.** RG-scope answers hand you *patterns* ("rate limiting is happening across your model deployments"). Trace-scope answers hand you *causes* ("this specific request hit the TPM cap at 04:38 UTC"). Both are true; only one is *actionable* per question. Match the scope to what you need.
+
+10. **Try observability agent — automated diagnosis.** The Observability agent takes the chart selection, pulls correlated events from every resource in the RG, and produces a root-cause hypothesis with citations. This is the Azure-side counterpart to §8.3.1's manual diagnostic dance — same pattern, different toolchain.
+
+    ![Observability agent — takes chart context, runs cross-resource correlation](assets/8-4-10.png)
+
+    ![Observability agent — additional filtering / configuration](assets/8-4-11.png)
+
+    ![Observability agent output — diagnosed the error as rate limiting](assets/8-4-12.png)
+
+    *Above: a concrete diagnosis — the error we saw on the chart traces back to **rate limiting** on the model endpoint. That's a quota / TPM problem, not a code or prompt problem. Left alone, it would present as intermittent user-visible failures; caught here, the fix is a quota request or a load-balancing tweak.*
+
+    > 🧠 **Skills-driven diagnosis on the model side too.** §8.3.1 used the `observe` skill for prompt-quality diagnostics; the Observability agent applies the same pattern (natural-language ask → tool-mediated evidence gathering → summarized hypothesis) to infra-side telemetry. Both keep the human as the *decider*, not the *searcher*.
+
+    > 💡 **Rate-limit findings usually mean you're at the wrong plan or wrong region.** Two fixes: (1) request quota increase for the current deployment, (2) migrate to a region with headroom. Both are §8.5 handoff decisions — capture the finding here, act in the next lab.
+
+#### What did we learn?
+
+- Foundry Monitor and Azure Monitor read the **same telemetry**, but at **different scopes** (agent vs. RG) and with **different affordances** (Foundry: evaluator + version aware; Azure: cross-resource + observability agent).
+- Every chart in both surfaces has an **AI-assisted "explain this" affordance** — Ask AI in Foundry, Observability agent in Azure. Learn to *use* them instead of building manual dashboards from scratch.
+- The **absence of a finding is a signal**, not a null result. Note it explicitly.
+- Rate limiting looks like a code problem until you correlate across resources — that's why the RG-scoped view exists.
+- Insights scans mature with baseline data. Week 2+ is where the scan starts earning its keep.
+
+#### 💡 Try one thing — chain a Foundry Ask AI + an Azure Observability agent query
+
+While you're on the Monitor tab, pick a chart with any deviation and click **Ask AI**. Note the hypothesis. Then click **Open in Azure Monitor** on the same chart and run the **Observability agent** on the equivalent selection. Compare the two:
+
+- Do they agree on the root cause?
+- Does one see something the other missed (e.g., Foundry catches an evaluator score drift; Azure catches a quota event that caused it)?
+
+The pattern you're practicing is *triangulation* — two independent tools looking at the same signal, catching each other's blind spots. This becomes routine in Capstone-scale operations.
+
+#### ⚠️ Tips & Troubleshooting
+
+- **The Monitor tab is empty for a new agent.** Give it at least an hour of real traffic (or a load-test loop like `04-generate-traffic.sh`) before you expect the panels to show anything meaningful.
+- **Insights scans need baseline data.** The first scan often returns "no issues" because there's nothing to compare against. That's not a failure — it's the scan *establishing the baseline*. Findings improve over time.
+- **Ask AI hallucinates the *reason* if the data is thin.** If the AI's explanation reads like a fluent story but the underlying chart barely has data, treat it as a first hypothesis, not an answer. Cross-check with the trace list.
+- **Observability agent scope surprises.** The agent correlates across every resource in the RG by default — including resources you don't own. Read the citations to confirm the finding is actually about *your* agent, not a noisy neighbor.
+- **Rate-limit findings are actionable but not urgent unless user-visible.** If quota headroom is <10%, request an increase now. If the finding is a one-off spike that already resolved, note it and move on — §8.5's Handoff has a checklist for closing out infra findings.
+
+### 8.5 Handoff — from Core Labs to Capstone
+
+#### Developer question
+
+> ❓ *We walked the Agent DevOps loop once end-to-end on a prompt agent. What did we actually build, what did we prove, and what should the Capstone add on top?*
+
+#### What we did — the four loop nodes, in order
+
+The Core Labs walked one node of the loop per section, using the **Contoso Travel Concierge prompt agent** as the subject. Each section produced concrete artifacts the next section consumed.
+
+| § | Node | What we did | What it produced |
+|---|---|---|---|
+| **8.1** | **Observe** | Sent 5 playground turns (canonical / clarification / adversarial / multi-part / diagnostic slow-trace). Read the score badges, the Metadata column, and the three trace views. | Vocabulary (`trace`, `span`, `action`, `trajectory`, `msearch`, `annotation`), six mental models, one hand-diagnosis of a 12.9 s slow trace. |
+| **8.2** | **Evaluate** | Ran two batch-eval paths on the same agent: **Path 1** simulated multi-turn conversations (`simulation-prompts-v1.jsonl`, 28 scenarios × 3 runs); **Path 2** curated single-turn against `evaluation-data-v2.jsonl` (25 rows). Used the portal's cluster analysis to surface the "unwarranted refusals" pattern. | Two eval runs listed side-by-side in the Evaluations tab; a named failure cluster ready for optimization. |
+| **8.3** | **Optimize** | Two paths, walked in order. **§8.3.1** drove the `observe` sub-skill by hand through 5 iterations (v3→v6), caught a **config-flaw** on the way (missing vector index → tokens dropped 176 K → 8 K → fixed via v6 fair re-eval), landed on **v6: 10→13 passes, avg 0.616→0.725 (+0.109)**. **§8.3.2** fired **Agent Optimizer** on a 3-model candidate pool (`gpt-5.4-mini` / `gpt-5.6-sol` / `gpt-5.4-nano`), which promoted **v7 on `gpt-5.4-nano`** — cheaper model + further-refined prompt beat both incumbent and upside. | `prompt-agent-optimized-v5.md`, `optimization-run-summary.md` (manual path); v7 live in the portal with `gpt-5.4-nano` (automated path). |
+| **8.4** | **Monitor** | Opened the Foundry Monitor tab (Ask AI on charts, Insights scan) and the Azure Monitor Observability agent (RG-scope pattern find, trace-scope cause find). Diagnosed a rate-limit finding end-to-end. | Two independent monitoring surfaces bookmarked, one closed observability report, one open follow-up (quota check). |
+
+Everything you touched maps back to the loop diagram §3.1 opened with — you've now traversed **Plan → Build → Evaluate → Deploy → Monitor → Optimize → Evaluate** on a real agent, with the *Protect* edge (safety/adversarial) exercised in §8.1 Turn 4 and §8.2 Path 1's adversarial simulator seeds.
+
+#### What we achieved — the concrete deltas
+
+- **Signal quality.** Went from "the agent feels okay in the playground" (§7.7) to *"here's the promoted version, here's the +11 pp average score, here's why the cheaper model won, here's the exact instruction diff, and here's the runbook if latency spikes tomorrow."*
+- **Reproducibility.** Every promoted version is paired with (a) the eval delta that justified it, (b) the reasoning that produced it, (c) the artifacts under `artifacts/prompts/generated/`. Six months from now the next optimization cycle starts from evidence, not folklore.
+- **Two drivers, one loop.** You learned both **skills-driven** (Copilot + `observe` sub-skill — for learning, high-stakes, or changed eval shape) and **automated** (Agent Optimizer — for routine cycles). Same primitives, different scheduler. Neither replaces the other.
+- **Two observation scopes.** You know when to reach for Foundry Monitor (agent-scoped, evaluator-aware) vs Azure Monitor + Observability agent (RG-scoped, cross-resource). One triangulates the other.
+- **Cost awareness.** The Optimizer's Pareto surface (`gpt-5.4-nano` wins) taught the reader that **model choice is inside the experiment**, not upstream of it — the same prompt on a cheaper model can beat a stronger model on the incumbent prompt.
+
+#### What we surfaced but *deliberately* deferred
+
+Two topics we intentionally did not close inside Core Labs, because they belong to Capstone:
+
+- **Hand-authored rubric evaluators.** §8.3.1 auto-generated a rubric via the `observe` skill; we deliberately did *not* teach the reader to override dimensions/weights, wire in Python-based evaluators, or ship a rubric under `artifacts/evaluators/reference/`. That toolchain (Python-hosted agent + `evaluator_catalog_create` + versioned rubrics) is a Capstone concept.
+- **Hosted agent + `.foundry/` code-first workflow.** The Optimize labs stayed inside the prompt agent surface. The hosted agent unlocks (a) instructions edited as code in `src/instructions/concierge.md`, (b) `src/scripts/snapshot-instructions.sh` for versioning, (c) `azd deploy` as the redeploy loop, (d) Agent Optimizer producing candidate configs under `.agent_configs/`, and (e) continuous eval as a CI hook.
+
+#### What comes next — the Capstone jump
+
+Capstone rebuilds the exact same loop you just walked, but on the **hosted agent** (`contoso-travel-concierge`, code-first, multi-agent). The four things that change:
+
+1. **`src/instructions/concierge.md` is the truth** (not the portal Instructions field). Every candidate you promote lands as a file under `src/instructions/versions/`.
+2. **`azd deploy` replaces the portal MCP write.** Faster to iterate, harder to lose track of what's in production — pair every deploy with a snapshot commit.
+3. **Multi-agent traces expose *which sub-agent* is weak.** The single-agent trajectory view from §8.1 becomes a *directed graph* of sub-agent hand-offs; §8.3.1's "read the msearch input" habit becomes "read the sub-agent's tool-call input."
+4. **Hand-authored rubric + Python evaluator.** The deferred piece from §8.3.1 lands here — you write a rubric with `task_and_scope_classification` weights *tuned by you*, not by the auto-generator.
+
+Everything you learned in §8.1–§8.4 transfers directly. The Capstone is the same shape at higher resolution — not a new mental model, a fuller instantiation of the one you already have.
+
+#### 💡 Try one thing before you start the Capstone
+
+Re-open [`artifacts/prompts/generated/optimization-run-summary.md`](../../artifacts/prompts/generated/optimization-run-summary.md) and read the "root cause discovery" section (the token-count anomaly / missing vector index) *from the Capstone's perspective*. On the hosted agent, that same class of bug shows up as a `file_search` tool that wasn't wired to the agent's tool list in `main.py`. Same failure signal (tokens drop, evals look artificially good), different fix location (code, not portal config). Read the paragraph you wrote a few hours ago as a *runbook for the Capstone version of that same bug* — that's the shape of the muscle memory you're building.
+
+#### ⚠️ Before you close the Core Labs environment
+
+- **Snapshot `src/instructions/concierge.md` as the "final Core Labs baseline"** even if the file was never edited — the Capstone will diff against it.
+- **Note the promoted agent version + model** (in our run: v7 on `gpt-5.4-nano`). The Capstone starts from a *known* baseline; write it down.
+- **Leave the RG running** if you plan to do the Capstone in the same session. Tear-down commands are in §9's cleanup checklist (once we get there) — do not run them yet.
+- **Cost check.** Log into the Azure portal → Cost Management for the RG. Note the current spend for the session; that's your budget baseline going into the Capstone.
+
+
+## 9. Capstone walkthrough — the hosted agent
+
+> 🚧 **Placeholder — walkthrough coming.** Capstone re-runs the same DevOps loop (Observe → Evaluate → Optimize → Monitor) on the **hosted, multi-agent** `contoso-travel-concierge` — code-first (`src/`), `azd`-deployed, versioned in `src/instructions/versions/`. Everything you learned in §7–§8 transfers directly; the shift is scope (single-prompt → multi-agent), driver (portal write → `azd deploy`), and truth (portal Instructions → `src/instructions/concierge.md`).
+
+### 9.0 What Capstone unlocks
+
+- **Same loop, higher resolution.** Prompt agent → hosted multi-agent (`flight_agent`, `hotel_agent`, `car_rental_agent`). Multi-agent traces show *which sub-agent* is weak — an axis the single-agent loop doesn't have.
+- **Code-first iteration.** `src/instructions/concierge.md` is the truth. `src/scripts/snapshot-instructions.sh` versions candidates. `azd deploy` redeploys. Faster iteration, harder to lose track of what's in production.
+- **Hand-authored rubric evaluator.** The deferred piece from §8.3.1 lands here — override the auto-generated dimensions/weights with ones tuned for *your* domain, ship it via `evaluator_catalog_create`, and version it under `artifacts/evaluators/reference/`.
+- **Agent Optimizer end-to-end.** §8.3.2 gave you the invocation; Capstone walks the *full* toolchain (`.agent_configs/`, `azd ai agent optimize`, apply candidate locally, redeploy).
+- **Continuous eval as a CI hook.** The `Recurring` frequency we bypassed in §8.2 Path 1 step 4 becomes the deploy gate — every push runs the smoke tier before promoting.
+
+### 9.1 What we'll walk (planned)
+
+| § | Node | Focus | Key artifacts |
+|---|---|---|---|
+| **9.1** | Reset + Observe | `./scripts/reset.sh`, playground the three canonical prompts on the hosted agent, read the *multi-agent* Trajectory view | first hosted traces, sub-agent hand-off shape |
+| **9.2** | Evaluate | Run the same `evaluation-data-v2.jsonl` batch eval on `contoso-travel-concierge`, note the failure cluster now surfaces *which sub-agent* to blame | hosted-agent baseline scores, sub-agent-scoped failure list |
+| **9.3** | Optimize — hand-authored rubric | Author a domain rubric that credits transparent tradeoffs + correct refusals, ship via `evaluator_catalog_create`, re-run to see the score with *your* weights | `artifacts/evaluators/reference/contoso-rubric-v1.yaml` |
+| **9.4** | Optimize — Agent Optimizer end-to-end | `azd ai agent optimize` on the hosted agent, review candidates under `.agent_configs/`, apply the winner, redeploy | `src/instructions/versions/instructions-N.md`, deployed candidate |
+| **9.5** | Monitor + Handoff | Confirm production traces on the hosted agent match the eval improvement; wrap the workshop | final Monitor screenshot, "workshop complete" checklist |
+
+### 9.2 Prerequisites — what to have running
+
+- Everything from Fundamentals + Core Labs (§7–§8) complete and checkpointed.
+- `azd` still authenticated (`azd auth login --check-status`) and the RG still live.
+- The last active version noted (in our run: `v7` on `gpt-5.4-nano`).
+- Cost check completed per §8.5's "before you close" checklist.
+
+### 🚧 Rest of §9 — coming in the next session.
+
+Until then, the four Core Labs walkthroughs (§8.1–§8.4) plus the wrap in §8.5 are the reference. Every muscle memory you built there transfers directly to §9.
