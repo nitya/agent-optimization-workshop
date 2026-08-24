@@ -26,9 +26,11 @@ flowchart LR
 
 The workshop ships a curated evaluation dataset at
 [`../../artifacts/datasets/reference/evaluation-data-v2.jsonl`](../../artifacts/datasets/reference/evaluation-data-v2.jsonl).
-It contains ~15 queries across three difficulty tiers (single-specialist,
-multi-part itinerary, and out-of-scope refusal) that together stress-test the
-Prompt Agent baseline.
+It contains **25 queries** organized into three tiers by `tags.tier` — `smoke`
+(5 rows, fast teaching), `regression` (13 rows, deep coverage), and `coverage`
+(7 rows, edge cases and adversarial) — that together stress-test the Prompt
+Agent baseline. Every row carries an `expected_behavior` field so the rubric
+evaluator has criteria to score against.
 
 > 💡 **Reproducibility.** You *could* have Foundry generate a dataset for you
 > (and Core Lab 03 will), but starting from the shipped reference guarantees
